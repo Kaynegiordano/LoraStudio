@@ -1,3 +1,9 @@
+# 1.2.0 — barre de progression en couleur, thèmes
+
+- **Barre de progression en couleur** pour l'entraînement et le Merge : plus haute, en dégradé (violet, bleu, vert) avec des rayures qui défilent pendant le travail, et le pourcentage à droite. Elle passe au vert quand c'est terminé, au rouge en cas d'erreur, à l'orange si vous arrêtez. Avant le premier pas : « Préparation… ».
+- **Dans la barre des tâches de Windows** : l'icône de Lora Studio montre l'avancée de l'entraînement, même fenêtre réduite.
+- **Thèmes** : bouton « Thème » dans la barre de titre, avec Sombre, Système (suit le mode clair ou sombre de Windows), Bleu (bleu nuit) et Clair. Le choix est retenu.
+
 # 1.1.1 — durée estimée juste en « Taille réelle des images »
 
 - **Durée annoncée trop longue** : avec « Taille réelle des images », la cadence mesurée au dernier entraînement était encore multipliée par 1,4, alors qu'elle avait déjà été mesurée en taille réelle. Exemple : 1 h 52 annoncée pour 1 h 20 réelle.

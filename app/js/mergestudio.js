@@ -156,7 +156,7 @@
     if (warning()) return KS.toast('Ces modèles n’ont pas la même architecture', 'err', 5000);
     S.running = true; S.pct = 0; S.text = 'Démarrage…'; S.result = null; S.error = ''; draw();
     S.unsub && S.unsub();
-    S.unsub = N.onMergeProgress(m => { S.pct = m.progress; S.text = m.text || ''; const bar = root && root.querySelector('.mg-bar > i'); if (bar) bar.style.width = S.pct + '%'; const t = root && root.querySelector('.mg-prog'); if (t) t.textContent = S.text; });
+    S.unsub = N.onMergeProgress(m => { S.pct = m.progress; S.text = m.text || ''; KS.bar.set(root && root.querySelector('.mg-bar'), S.pct, 'running'); const t = root && root.querySelector('.mg-prog'); if (t) t.textContent = S.text; });
     const r = await N.mergeRun(jobOf());
     S.unsub && S.unsub(); S.unsub = null; S.running = false;
     if (r.ok) { S.result = r; S.list = null; KS.toast('Fusion terminée : ' + r.name, 'ok', 5000); await load(true); } else if (!r.cancelled) S.error = r.error; else S.error = 'Fusion annulée.';
@@ -198,7 +198,7 @@
       h('div.lt-row', F().field('Nom du nouveau fichier', name, 'Un fichier existant n’est jamais écrasé : un numéro est ajouté'), F().field('Précision', dt, 'bf16 et fp16 : même taille ; fp32 : plus précis, deux fois plus gros. En bf16, de très petites contributions de LoRA peuvent être arrondies.')),
       h('div.mg-warn.fx-md', { html: F().md(warning()) }),
       h('div.lt-row.lt-go', go, cancel),
-      S.running ? h('div', h('div.lt-bar.mg-bar', h('i', { style: 'width:' + S.pct + '%' })), h('div.fx-info.mg-prog', { text: S.text })) : null,
+      S.running ? h('div', Object.assign(KS.bar.make(S.pct, 'running'), { className: 'lt-prog mg-bar' }), h('div.fx-info.mg-prog', { text: S.text })) : null,
       resultBox());
     const refresh = tbtn('Actualiser la liste', () => load(true), '.sm');
     root.replaceChildren(h('div.lt-col.mg-col', h('div.fx-panel.lt-card', h('div.fx-h', { text: 'Merge' }),

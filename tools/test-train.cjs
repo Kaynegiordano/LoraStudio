@@ -10,7 +10,8 @@ const preload = path.join(tmp, 'preload.cjs');
 fs.writeFileSync(preload, `
 window.loraImages = []; window.loraPaths = [];
 window.ksNative = {
-  setTitleBar() {},
+  setTitleBar(o) { window.titleBar = o; },
+  setProgress(value, mode) { (window.taskbar ||= []).push([value, mode]); },
   pathForFile: file => 'C:/selected/' + file.name,
   pickImagePaths: async () => window.loraPaths,
   loraThumb: async (file, width) => { (window.thumbCalls ||= []).push({ file, width }); return { ok: false }; },
@@ -125,6 +126,39 @@ async function scenario() {
   // Vignettes : une seule demande par image, même affichée deux fois (galerie et légendes)
   const asked = window.thumbCalls.length, files = new Set(window.thumbCalls.map(c => c.file + '|' + c.width));
   assert(asked > 0 && files.size === asked, 'Vignettes : ' + asked + ' demande(s) pour ' + files.size + ' image(s), jamais deux fois la même');
+  // Barre de progression en couleur : état, pourcentage, barre des tâches de Windows
+  const runAt = (state, pct, running) => ({ run: 'C:/runs/r9', project: 'Import-test', running, state, pct, text: state, output: '', token: '', checkpoints: [], samples: [], before: [], epochs: [] });
+  const prog = () => document.querySelector('.lt-train-prog');
+  const show = async (state, pct, running) => { window.loraRun = runAt(state, pct, running); KS.trainTab.invalidate(); await wait(() => prog() && prog().dataset.state === (running && pct < 1 ? 'waiting' : state)); };
+  await show('running', 42, true);
+  assert(prog().querySelector('.lt-bar > i').style.width === '42%' && prog().querySelector('.lt-pct').textContent === '42 %' && getComputedStyle(prog().querySelector('.lt-bar > i')).animationName === 'lt-stripes',
+    'Progression : 42 % en cours = barre remplie à 42 %, pourcentage affiché, rayures animées');
+  assert(window.taskbar.at(-1)[0] === 0.42 && window.taskbar.at(-1)[1] === 'normal', 'Progression : la barre des tâches de Windows suit (0,42)');
+  await show('running', 0, true);
+  assert(prog().querySelector('.lt-pct').textContent === 'Préparation…' && window.taskbar.at(-1)[0] === 2, 'Progression : avant le premier pas, « Préparation… » et défilement dans la barre des tâches');
+  await show('done', 100, false);
+  assert(prog().querySelector('.lt-pct').textContent === 'Terminé · 100 %' && getComputedStyle(prog().querySelector('.lt-bar > i')).animationName === 'none' && window.taskbar.at(-1)[0] === -1,
+    'Progression : terminé = verte, sans animation, barre des tâches libérée');
+  await show('error', 37, false);
+  assert(prog().querySelector('.lt-pct').textContent === 'Erreur · 37 %' && window.taskbar.at(-1)[1] === 'error', 'Progression : erreur = rouge, signalée dans la barre des tâches');
+  await show('stopped', 60, false);
+  assert(prog().querySelector('.lt-pct').textContent === 'Arrêté · 60 %', 'Progression : arrêté = orange, avec le pourcentage atteint');
+  // Thèmes : Sombre, Système, Bleu, Clair ; le choix est retenu et la barre de titre suit
+  const btn = document.querySelector('.ls-theme');
+  btn.click(); await new Promise(r => setTimeout(r, 50));
+  const items = [...document.querySelectorAll('.menu .mi .lb')].map(e => e.textContent);
+  assert(items.join('|') === 'Sombre|Système (suit Windows)|Bleu|Clair', 'Thème : quatre choix dans le menu : ' + items.join(', '));
+  [...document.querySelectorAll('.menu .mi')].find(i => i.textContent.includes('Bleu')).click();
+  assert(document.body.classList.contains('theme-blue') && !document.body.classList.contains('theme-light') && window.titleBar.color === '#13223b' && btn.textContent === 'Thème : Bleu'
+    && JSON.parse(localStorage.getItem('kanevas.prefs')).theme === 'blue', 'Thème Bleu : appliqué, barre de titre assortie, choix retenu');
+  KS.setTheme('dark');
+  assert(document.body.classList.contains('theme-dark') && !document.body.classList.contains('theme-blue') && getComputedStyle(document.body).backgroundColor === 'rgb(17, 19, 23)', 'Thème Sombre : fond sombre');
+  KS.setTheme('system');
+  const sysDark = matchMedia('(prefers-color-scheme: dark)').matches;
+  assert(document.body.classList.contains(sysDark ? 'theme-dark' : 'theme-light') && btn.textContent === 'Thème : Système', 'Thème Système : suit Windows (' + (sysDark ? 'sombre' : 'clair') + ' ici)');
+  KS.setTheme('light');
+  assert(document.body.classList.contains('theme-light') && window.titleBar.color === '#ffffff', 'Thème Clair : rétabli');
+  await show('running', 42, true);
   return results;
 }
 
@@ -138,6 +172,15 @@ app.whenReady().then(async () => {
     const results = await win.webContents.executeJavaScript('(' + scenario.toString() + ')()');
     if (errors.length) throw new Error(errors.join('\n'));
     for (const r of results) console.log('OK ' + r);
+    // npx electron tools/test-train.cjs <dossier> : une capture de la carte d'entraînement par thème
+    const shots = process.argv[2];
+    if (shots) {
+      fs.mkdirSync(shots, { recursive: true });
+      for (const id of ['light', 'dark', 'blue']) {
+        await win.webContents.executeJavaScript(`KS.setTheme('${id}'); window.gpuPush({ used: 11800, total: 16303, util: 98, temp: 64, name: 'RTX', shared: 80, level: 'ok' }); document.querySelector('.lt-train-prog').scrollIntoView({ block: 'center' }); new Promise(r => setTimeout(r, 700))`);
+        fs.writeFileSync(path.join(shots, 'theme-' + id + '.png'), (await win.webContents.capturePage()).toPNG());
+      }
+    }
     app.exit(0);
   } catch (error) {
     console.error('ÉCHEC', error.message);

@@ -69,6 +69,10 @@ ipcMain.on('set-titlebar', (_e, o) => {
   try { if (win) win.setTitleBarOverlay({ ...o, height: 40 }); } catch { /* ancien Windows */ }
   if (o && /^#[\da-f]{6}$/i.test(o.color) && /^#[\da-f]{6}$/i.test(o.symbolColor)) fs.promises.writeFile(chromeFile(), JSON.stringify({ color: o.color, symbolColor: o.symbolColor })).catch(() => {});
 });
+// Avancée de l'entraînement dans la barre des tâches de Windows : 0 à 1, 2 = en préparation (défilement), -1 = rien.
+ipcMain.on('set-progress', (_e, value, mode) => {
+  try { if (win && !win.isDestroyed()) win.setProgressBar(Number.isFinite(+value) ? +value : -1, { mode: ['normal', 'error', 'paused'].includes(mode) ? mode : 'normal' }); } catch { /* rien */ }
+});
 const updater = require('./updater.cjs')(() => win);
 
 /* ------------------------------------------------------------------ carte graphique (barre de VRAM) */

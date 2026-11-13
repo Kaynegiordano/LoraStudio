@@ -4,6 +4,7 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 contextBridge.exposeInMainWorld('ksNative', {
   platform: process.platform,
   setTitleBar: o => ipcRenderer.send('set-titlebar', o),
+  setProgress: (value, mode) => ipcRenderer.send('set-progress', value, mode),
   pathForFile: f => { try { return webUtils.getPathForFile(f); } catch { return null; } },
   // atelier LoRA
   loraCall: (cmd, args) => ipcRenderer.invoke('lora-call', cmd, args),

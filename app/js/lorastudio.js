@@ -81,7 +81,8 @@
         const was = S.run.running;
         S.run = st;
         msg('train', st.text);
-        const bar = root && root.querySelector('.lt-bar > i'); if (bar) bar.style.width = (st.pct || 0) + '%';
+        KS.bar.set(root && root.querySelector('.lt-train-prog'), st.pct, st.state, 'train');
+        if (!root || !root.isConnected) N.setProgress?.(st.running ? (st.pct || 0) / 100 : -1);      // autre onglet : la barre des tâches suit quand même
         const tail = root && root.querySelector('.lt-log'); if (tail) tail.textContent = st.tail || '';
         if (was && !st.running) {
           stopPoll();
@@ -557,7 +558,7 @@
         tbtn('Annuler l\'extinction', async () => { S.power = false; await N.loraShutdown(false); msg('power', 'Extinction annulée : le PC restera allumé.'); render(); })),
       msgBox('power'),
       KS.gpu ? KS.gpu.meter({ detail: true }) : null,
-      h('div.lt-bar', h('i', { style: { width: (run ? run.pct || 0 : 0) + '%' } })),
+      Object.assign(KS.bar.make(run ? run.pct : 0, run ? run.state : 'idle', 'train'), { className: 'lt-prog lt-train-prog' }),
       msgBox('train'),
       run && run.tail ? h('pre.lt-log', { text: run.tail }) : null,
       samples, results);
