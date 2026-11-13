@@ -44,6 +44,7 @@ if (!app.requestSingleInstanceLock()) {
     updater.checkSoon();
   });
   app.on('window-all-closed', () => app.quit());
+  app.on('will-quit', () => gpuMonitor.stop());
 }
 
 const chromeFile = () => path.join(app.getPath('userData'), 'window-chrome.json');
@@ -62,12 +63,18 @@ function createWindow() {
   win.webContents.setWindowOpenHandler(({ url }) => { if (/^https:\/\//.test(url)) shell.openExternal(url); return { action: 'deny' }; });
   win.loadFile(path.join(__dirname, 'app', 'index.html'));
   win.on('closed', () => { win = null; });
+  gpuMonitor.start();
 }
 ipcMain.on('set-titlebar', (_e, o) => {
   try { if (win) win.setTitleBarOverlay({ ...o, height: 40 }); } catch { /* ancien Windows */ }
   if (o && /^#[\da-f]{6}$/i.test(o.color) && /^#[\da-f]{6}$/i.test(o.symbolColor)) fs.promises.writeFile(chromeFile(), JSON.stringify({ color: o.color, symbolColor: o.symbolColor })).catch(() => {});
 });
 const updater = require('./updater.cjs')(() => win);
+
+/* ------------------------------------------------------------------ carte graphique (barre de VRAM) */
+// Relevé toutes les 2 s (gpu-monitor.cjs), poussé à la page ; `gpu-stats` rend le dernier relevé à l'ouverture.
+const gpuMonitor = require('./gpu-monitor.cjs').createMonitor(s => { try { if (win && !win.isDestroyed()) win.webContents.send('gpu-stats', s); } catch { /* fenêtre fermée */ } });
+ipcMain.handle('gpu-stats', () => gpuMonitor.last());
 
 /* ------------------------------------------------------------------ atelier LoRA (lora_bridge.py) */
 ipcMain.handle('lora-call', async (_e, cmd, args = {}) => {
@@ -90,10 +97,10 @@ ipcMain.handle('lora-call', async (_e, cmd, args = {}) => {
   } catch (err) { return { ok: false, error: String(err.message || err) }; }
 });
 const inProjects = file => { const d = dirs(); return insideDir(path.join(d.data, 'lora_training'), file) || insideDir(d.lora, file) || insideDir(path.join(d.root, 'output', 'lora'), file); };
-ipcMain.handle('lora-thumb', (_e, file, width = 256) => {
+ipcMain.handle('lora-thumb', async (_e, file, width = 256) => {
   try {
     if (!inProjects(file)) throw new Error('Chemin refusé');
-    const ni = nativeImage.createFromPath(file);
+    const ni = nativeImage.createFromBuffer(await fs.promises.readFile(file));   // lecture hors du fil principal
     if (ni.isEmpty()) throw new Error('Image illisible');
     const sz = ni.getSize();
     return { ok: true, data: new Uint8Array((sz.width > width ? ni.resize({ width, quality: 'good' }) : ni).toJPEG(85)), w: sz.width, h: sz.height };

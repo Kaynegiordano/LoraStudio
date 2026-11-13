@@ -4,7 +4,7 @@
 'use strict';
 (() => {
   const h = KS.h, N = KS.native, U = KS.util, ui = KS.ui;
-  const S = { info: null, projects: [], cur: '', data: null, form: null, caps: {}, msgs: {}, run: null, power: false, poll: null, thumbs: new Map(), loading: '' };
+  const S = { info: null, projects: [], cur: '', data: null, form: null, caps: {}, msgs: {}, run: null, power: false, poll: null, thumbs: new Map(), thumbUrls: new Map(), loading: '' };
   let root = null;
   const F = () => KS.fxui;
   const call = async (cmd, args = {}) => { const r = await N.loraCall(cmd, args); if (!r.ok) throw new Error(r.error); return r; };
@@ -16,15 +16,30 @@
     msg(key, '⏳ ' + text);
     try { return await fn(); } catch (e) { msg(key, '⚠️ ' + e.message); throw e; }
   };
-  async function thumb(file, w = 256) {
+  // Vignettes : une seule demande par image (la promesse est gardée), et seulement quand l'image approche de l'écran.
+  // Avant, chaque rendu demandait toutes les vignettes d'un coup, y compris celles cachées plus bas dans les listes.
+  function thumb(file, w = 256) {
     const k = file + '|' + w;
-    if (S.thumbs.has(k)) return S.thumbs.get(k);
-    const r = await N.loraThumb(file, w);
-    const u = r.ok ? URL.createObjectURL(new Blob([r.data], { type: 'image/jpeg' })) : '';
-    S.thumbs.set(k, u);
-    return u;
+    if (!S.thumbs.has(k)) S.thumbs.set(k, N.loraThumb(file, w).then(r => {
+      const u = r.ok ? URL.createObjectURL(new Blob([r.data], { type: 'image/jpeg' })) : '';
+      S.thumbUrls.set(k, u);
+      return u;
+    }, () => ''));
+    return S.thumbs.get(k);
   }
-  const img = (file, w) => { const i = h('img', { alt: '', loading: 'lazy' }); thumb(file, w).then(u => { if (u) i.src = u; }); return i; };
+  const BLANK = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
+  const lazy = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+    for (const e of entries) if (e.isIntersecting) { lazy.unobserve(e.target); const i = e.target; thumb(i._file, i._w).then(u => { if (u) i.src = u; }); }
+  }, { rootMargin: '400px' }) : null;
+  const img = (file, w) => {
+    const i = h('img', { alt: '' });
+    const ready = S.thumbUrls.get(file + '|' + w);
+    if (ready) i.src = ready;                                   // déjà faite : pas d'attente, pas de clignotement au rendu
+    else if (lazy) { i.src = BLANK; i._file = file; i._w = w; lazy.observe(i); }
+    else thumb(file, w).then(u => { if (u) i.src = u; });
+    return i;
+  };
+  const dropThumbs = () => { for (const u of S.thumbUrls.values()) if (u) URL.revokeObjectURL(u); S.thumbs.clear(); S.thumbUrls.clear(); };
 
   /* ---------------------------------------------------------------- données */
   const FORM_KEYS = ['trigger', 'lora_type', 'steps', 'epochs', 'repeats', 'resolution', 'dim', 'learning_rate', 'optimizer', 'scope', 'multires', 'native_res', 'flip_aug',
@@ -41,7 +56,9 @@
   async function openProject(name) {
     S.cur = name; KS.prefs.loraProject = name; KS.prefs.save();
     if (!name) { S.data = null; S.form = null; S.caps = {}; return render(); }
-    S.data = await call('load', { name });
+    const data = await call('load', { name });
+    if (!S.info || S.cur !== name) return;          // atelier relu ou autre projet choisi entre-temps : ce rendu-là fera foi
+    S.data = data;
     const m = S.data.manifest || {};
     S.form = { ...DEF, ...Object.fromEntries(FORM_KEYS.filter(k => m[k] != null).map(k => [k, m[k]])) };
     if (!S.form.base_model || !S.info.dits.some(d => d.path === S.form.base_model)) S.form.base_model = S.info.dit;
@@ -97,7 +114,7 @@
       const left = (KS.prefs.loraQueue || []).length;
       S.run = { run: r.run, project: name, running: true, state: 'running', pct: 0, checkpoints: [], samples: [],
         text: `File d'attente : **${label({ name, trigger: m.trigger })}** démarré, environ ${hh} h ${String(mm).padStart(2, '0')}.` + (left ? ` Encore ${left} projet(s) ensuite.` : ' Dernier de la file.') };
-      S.msgs.train = S.run.text;
+      S.msgs.train = S.run.text; KS.gpu?.resetPeak();
       KS.toast('Entraînement suivant : ' + label({ name, trigger: m.trigger }), 'info', 5000);
       startPoll(); if (root && root.isConnected) render();
       return true;
@@ -262,6 +279,15 @@
     const mb = v => Math.round(v / 1048576);
     return before.ok && after.ok ? `Free VRAM **${mb(after.total - after.used)} MB** of ${mb(after.total)} MB (was ${mb(before.total - before.used)} MB). Forge reloads the checkpoint by itself on the next generation.` : 'Modèle de Forge déchargé.';
   }
+  // Avant de lancer : ce que d'autres programmes occupent déjà est retiré à l'entraînement (sd-scripts charge sa propre
+  // copie du modèle). Au-delà de 3 Go pris, on le dit ; le pic de la barre repart de là.
+  function vramTaken() {
+    const g = KS.gpu; if (!g) return '';
+    g.resetPeak();
+    const s = g.last; if (!s || s.used < 3072) return '';
+    const go = v => (v / 1024).toFixed(1).replace('.', ',');
+    return `\n\n⚠️ **${go(s.used)} Go de VRAM sont déjà occupés** par d’autres programmes (sur ${go(s.total)} Go) : l’entraînement risque de saturer la carte. Surveillez la barre de VRAM.`;
+  }
   async function start() {
     if (!S.cur) return msg('train', 'Choisissez d’abord un projet.');
     if ((KS.prefs.loraQueue || []).includes(S.cur)) { KS.prefs.loraQueue = KS.prefs.loraQueue.filter(n => n !== S.cur); KS.prefs.save(); }
@@ -273,12 +299,14 @@
       if (S.freeFirst !== false && KS.engine && KS.engine.ready()) note = '\n\n' + await freeVram();
       const patch = {}; for (const k of FORM_KEYS) patch[k] = f[k];
       await call('save', { name: S.cur, patch });
+      const vramBefore = vramTaken();
       const r = await busy('train', 'Préparation du jeu de données et démarrage de sd-scripts…', () => call('start', { name: S.cur, dit: f.base_model, qwen3: S.qwen3 || S.info.qwen3, vae: S.vae || S.info.vae, sample_every: f.sample_every, sample_prompt: f.sample_prompt }));
       const hh = Math.floor(r.estimate_s / 3600), mm = Math.floor(r.estimate_s % 3600 / 60);
       S.msgs.train = `Démarré (pid ${r.pid}). ${r.count} image(s) × ${f.repeats} répétitions${r.resolutions.length > 1 ? ` × ${r.resolutions.length} résolutions` : ''} = ${r.per_epoch} pas par époque, `
         + `${+f.epochs > 0 ? f.epochs + ' époques' : f.steps + ' pas fixés à la main'} = ${r.total} pas en ${r.resolutions.map(x => x + ' px').join(' × ')}, dimension ${f.dim}, `
         + `${f.optimizer === 'prodigy' ? 'taux adaptatif' : 'taux ' + (+f.learning_rate).toPrecision(2)}.\n\nDurée estimée : **${hh} h ${String(mm).padStart(2, '0')}**. Dans vos invites : **${r.token || f.trigger}**. Le résultat arrive dans \`${r.output}\`.\n\n`
         + 'KaneApp attendra la fin de cet entraînement pour les nouvelles générations.' + note;
+      S.msgs.train += vramBefore;
       S.run = { run: r.run, project: S.cur, running: true, state: 'running', pct: 0, text: S.msgs.train, checkpoints: [], samples: [] };
       startPoll(); render();
     } catch (e) { msg('train', '⚠️ ' + e.message); }
@@ -307,7 +335,7 @@
       stopPoll();
       let r = null;
       try { r = await call('refresh'); } catch (e) { note = '⚠️ ' + e.message; }
-      S.run = r && r.status || null; S.checked = 0; S.thumbs.clear();
+      S.run = r && r.status || null; S.checked = 0; dropThumbs();
       if (r && r.fixed && r.fixed.length) note = '🔧 Entraînement bloqué libéré : ' + r.fixed.map(x => x.reason).join(' ; ') + '. Vous pouvez relancer.';
       const cat = KS.studioApi && KS.studioApi.cat();
       S.info = await call('info', { modules: (cat && cat.current.modules) || [] });
@@ -368,7 +396,7 @@
       if (S.freeFirst !== false && KS.engine && KS.engine.ready()) { try { await freeVram(); } catch { /* génération en cours : on continue */ } }
       const r = await call('start', { name: project, dit, qwen3: S.qwen3 || info.qwen3, vae: S.vae || info.vae, sample_every: m.sample_every ?? 250, sample_prompt: m.sample_prompt || '' });
       S.run = { run: r.run, project, running: true, state: 'running', pct: 0, text: 'Entraînement relancé (pid ' + r.pid + ').', checkpoints: [], samples: [] };
-      S.msgs.train = S.run.text; S.checked = 0;
+      S.msgs.train = S.run.text; S.checked = 0; KS.gpu?.resetPeak();
       startPoll();
       KS.toast('Entraînement de « ' + name + ' » relancé', 'ok', 3500);
       if (root && root.isConnected) { if (S.cur === project) await openProject(project); else render(); }
@@ -390,7 +418,7 @@
 
   /* ---------------------------------------------------------------- rendu */
   function render() {
-    if (!root || !root.isConnected) return;
+    if (!root || !root.isConnected || !S.info) return;
     const { field, row2, slider, select, check, text, tbtn } = F();
     const sc = root.closest('.fx-body'), top = sc ? sc.scrollTop : 0;
     const I = S.info, f = S.form || { ...DEF };
@@ -441,7 +469,7 @@
     for (const im of (S.data ? S.data.images : [])) {
       const ta = h('textarea.fx-ta.fx-small', { rows: 2, spellcheck: false }); ta.value = S.caps[im.file] || '';
       ta.addEventListener('input', () => { S.caps[im.file] = ta.value; });
-      rows.appendChild(h('div.lt-caprow', img(im.preview || im.path, 120), h('div.fx-col', h('span.fx-info', { text: im.file }), ta)));
+      rows.appendChild(h('div.lt-caprow', img(im.preview || im.path, 200), h('div.fx-col', h('span.fx-info', { text: im.file }), ta)));
     }
     const captions = h('div.fx-panel.lt-card', h('div.fx-h', { text: 'Légendes' }),
       h('div.lt-row', slider('Seuil de confiance des tags', f, 'threshold', 0.1, 0.9, 0.05, '', saveForm), tbtn('Légender toutes les images', () => autoCaption().catch(() => {}), '.primary')),
@@ -528,6 +556,7 @@
       h('div.lt-row', check('Éteindre le PC quand l\'entraînement est terminé', power, 'v', '2 min après la fin, réussi ou en échec ; pas si vous l\'arrêtez vous-même. KaneApp doit rester ouvert.', v => { S.power = v; msg('power', v ? '⏻ Le PC s\'éteindra 2 minutes après la fin de l\'entraînement (réussi ou en échec). Pas d\'extinction si vous l\'arrêtez vous-même.' : 'Le PC restera allumé à la fin de l\'entraînement.'); }),
         tbtn('Annuler l\'extinction', async () => { S.power = false; await N.loraShutdown(false); msg('power', 'Extinction annulée : le PC restera allumé.'); render(); })),
       msgBox('power'),
+      KS.gpu ? KS.gpu.meter({ detail: true }) : null,
       h('div.lt-bar', h('i', { style: { width: (run ? run.pct || 0 : 0) + '%' } })),
       msgBox('train'),
       run && run.tail ? h('pre.lt-log', { text: run.tail }) : null,
@@ -553,9 +582,15 @@
       el.replaceChildren(h('div.fx-panel', h('div.fx-note', { text: 'Lecture de l\'entraîneur de Forge…' })));
       try {
         if (!N || !N.loraCall) throw new Error('Disponible seulement dans l\'application de bureau');
-        if (!S.info) { const cat = KS.studioApi && KS.studioApi.cat(); S.info = await call('info', { modules: (cat && cat.current.modules) || [] }); }
-        await refreshProjects();
-        if (!S.run) { try { const st = (await call('status')).status; if (st && st.running) { S.run = st; S.msgs.train = st.text; startPoll(); } } catch { /* rien */ } }
+        // les trois lectures de la passerelle en même temps, pas l'une après l'autre
+        const cat = KS.studioApi && KS.studioApi.cat();
+        const [info, , st] = await Promise.all([
+          S.info || call('info', { modules: (cat && cat.current.modules) || [] }),
+          refreshProjects(),
+          S.run ? null : call('status').then(r => r.status, () => null),
+        ]);
+        S.info = info;
+        if (!S.run && st && st.running) { S.run = st; S.msgs.train = st.text; startPoll(); }
         const want = S.cur || KS.prefs.loraProject || (S.run && S.run.project) || (S.projects[0] || {}).name || '';
         if (want && S.projects.some(p => p.name === want)) await openProject(want); else render();
       } catch (e) { el.replaceChildren(h('div.fx-panel', h('div.fx-note', { text: 'Atelier LoRA : ' + e.message }), KS.fxui.tbtn('Réessayer', () => KS.trainTab.render(el)))); }

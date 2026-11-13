@@ -1,7 +1,7 @@
 {
   "name": "lorastudio",
   "productName": "Lora Studio",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Lora Studio — entraînement de LoRA et Merge, avec les moteurs de KaneApp",
   "main": "main.cjs",
   "private": true,
@@ -26,7 +26,7 @@
     "executableName": "LoraStudio",
     "copyright": "Kane",
     "directories": { "output": "dist", "buildResources": "build" },
-    "files": ["main.cjs", "preload.cjs", "updater.cjs", "output-paths.cjs", "managed-runtimes.cjs", "lora_bridge.py", "merge_bridge.py", "app/**/*"],
+    "files": ["main.cjs", "preload.cjs", "updater.cjs", "output-paths.cjs", "managed-runtimes.cjs", "gpu-monitor.cjs", "lora_bridge.py", "merge_bridge.py", "app/**/*"],
     "asarUnpack": ["lora_bridge.py", "merge_bridge.py"],
     "extraResources": [{ "from": "build/icon.ico", "to": "lorastudio.ico" }],
     "win": {

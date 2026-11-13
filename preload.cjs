@@ -29,6 +29,9 @@ contextBridge.exposeInMainWorld('ksNative', {
   forgeRefreshLoras: () => ipcRenderer.invoke('forge-refresh-loras'),
   forgeRefreshCheckpoints: () => ipcRenderer.invoke('forge-refresh-checkpoints'),
   sendToKaneApp: what => ipcRenderer.invoke('send-to-kaneapp', what),
+  // carte graphique : dernier relevé, puis un relevé toutes les 2 s
+  gpuStats: () => ipcRenderer.invoke('gpu-stats'),
+  onGpuStats: fn => { const h = (_e, s) => fn(s); ipcRenderer.on('gpu-stats', h); return () => ipcRenderer.removeListener('gpu-stats', h); },
   // mises à jour
   appVersion: () => ipcRenderer.invoke('app-version'),
   updateCheck: () => ipcRenderer.invoke('update-check'),

@@ -35,8 +35,9 @@
   async function refreshGpu() {
     const r = await KS.engineCheck();
     gpu.innerHTML = r && r.up ? `Moteur de KaneApp : <b>${r.loaded ? 'modèle chargé' : 'démarré, sans modèle'}</b>` + (r.loaded ? ' — libéré avant chaque entraînement' : '')
-      : 'Moteur de KaneApp : <b>arrêté</b> (carte graphique libre)';
+      : 'Moteur de KaneApp : <b>arrêté</b>';
   }
+  document.getElementById('ls-vram').append(KS.gpu.meter());      // VRAM de la carte, en continu
   window.addEventListener('focus', refreshGpu);
   setInterval(() => { if (!document.hidden) refreshGpu(); }, 15000);
 

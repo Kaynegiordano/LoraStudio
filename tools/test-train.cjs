@@ -13,7 +13,7 @@ window.ksNative = {
   setTitleBar() {},
   pathForFile: file => 'C:/selected/' + file.name,
   pickImagePaths: async () => window.loraPaths,
-  loraThumb: async () => ({ ok: false }),
+  loraThumb: async (file, width) => { (window.thumbCalls ||= []).push({ file, width }); return { ok: false }; },
   loraCall: async (cmd, args = {}) => {
     if (cmd === 'info') return { ok: true, presets: { style: { label: 'Style' } }, scopes: { full: { label: 'Full', hint: '', summary: 'All' } },
       resolutions: [512,1024], optimizers: { adamw8bit: 'AdamW' }, dits: [], fewshot_resolutions: [512,1024], sd_scripts: 'C:/training', tagger: true };
@@ -26,6 +26,8 @@ window.ksNative = {
     return {ok:true,status:null};
   },
   forgeAlive: async () => ({ ok: true, up: false }),
+  gpuStats: async () => null,
+  onGpuStats: fn => { window.gpuPush = fn; },
   forgeProgress: async () => ({ ok: false }),
   sendToKaneApp: async what => { (window.sent ||= []).push(what); return { ok: true }; },
 };
@@ -99,6 +101,30 @@ async function scenario() {
   [...document.querySelectorAll('.lt-ep button')].find(b => b.textContent === 'Essayer').click();
   await wait(() => window.sent?.length === 1);
   assert(window.sent[0].prompt === '<lora:n1x3u:1> @n1x3u', '« Essayer » envoie le LoRA et son déclencheur à KaneApp : ' + JSON.stringify(window.sent[0]));
+  // Barre de VRAM : dans la barre de titre et dans la carte d'entraînement ; niveaux, pic, débordement dans la RAM
+  const head = document.querySelector('#ls-vram .gpu-meter'), card = () => document.querySelector('.lt-card .gpu-meter.detail');
+  assert(head && card() && head.dataset.level === 'none' && head.textContent.includes('—'), 'VRAM : une barre dans la barre de titre et une dans la carte, vides sans relevé');
+  window.gpuPush({ used: 12288, total: 16384, util: 97, temp: 63, name: 'RTX test', shared: 80, level: 'ok' });
+  assert(head.dataset.level === 'ok' && head.querySelector('i').style.width === '75%' && head.textContent.includes('12,0 / 16,0 Go'), 'VRAM : 12 Go sur 16 = barre à 75 %, en Go : ' + head.textContent);
+  assert(card().textContent.includes('charge 97 %') && card().textContent.includes('63 °C') && card().querySelector('.gpu-note').hidden, 'VRAM, carte d’entraînement : charge et température, pas d’avertissement tant qu’il reste de la marge');
+  window.gpuPush({ used: 15200, total: 16384, util: 99, temp: 70, name: 'RTX test', shared: 90, level: 'high' });
+  assert(head.dataset.level === 'high' && head.textContent.includes('presque pleine') && !card().querySelector('.gpu-note').hidden, 'VRAM presque pleine : signalée, avec la marge restante');
+  window.gpuPush({ used: 16300, total: 16384, util: 99, temp: 72, name: 'RTX test', shared: 3072, level: 'full' });
+  const note = card().querySelector('.gpu-note').textContent;
+  assert(head.dataset.level === 'full' && head.textContent.includes('saturée') && note.includes('3,0 Go ont débordé') && note.includes('768 px'), 'VRAM saturée : débordement dans la mémoire vive chiffré, avec quoi faire : ' + note);
+  window.gpuPush({ used: 9000, total: 16384, util: 90, temp: 66, name: 'RTX test', shared: 80, level: 'ok' });
+  assert(card().textContent.includes('pic 15,9 Go') && !card().querySelector('.gpu-track u').hidden, 'VRAM : le pic reste marqué quand la mémoire redescend');
+  // Lancer un entraînement : le pic repart, et une carte déjà occupée est signalée
+  window.loraRun = null; KS.trainTab.invalidate(); await wait(() => !!document.querySelector('.lt-start') && !document.querySelector('.lt-ep'));
+  const starts = (window.loraStarts || []).length;
+  document.querySelector('.lt-start').click();
+  await wait(() => (window.loraStarts || []).length === starts + 1 && /déjà occupés/.test(document.querySelector('[data-msg="train"]').textContent));
+  assert(KS.gpu.peak === 9000 && document.querySelector('[data-msg="train"]').textContent.includes('8,8 Go de VRAM sont déjà occupés'), 'Lancer : le pic repart de zéro et 8,8 Go déjà pris sont signalés');
+  window.gpuPush(null);
+  assert(head.dataset.level === 'none', 'VRAM : sans nvidia-smi, la barre reste vide au lieu de planter');
+  // Vignettes : une seule demande par image, même affichée deux fois (galerie et légendes)
+  const asked = window.thumbCalls.length, files = new Set(window.thumbCalls.map(c => c.file + '|' + c.width));
+  assert(asked > 0 && files.size === asked, 'Vignettes : ' + asked + ' demande(s) pour ' + files.size + ' image(s), jamais deux fois la même');
   return results;
 }
 

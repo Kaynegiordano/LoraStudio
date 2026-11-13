@@ -142,6 +142,24 @@ EDITABLE = {"trigger", "steps", "epochs", "repeats", "resolution", "dim", "learn
             "rank_dropout", "module_dropout", "flip_aug", "multires", "lora_type", "captions", "sample_prompt", "sample_every", "recipe", "native_res"}
 
 
+def tagger_ready() -> tuple[bool, str]:
+    """Le tagger WD14 est-il là ? Même réponse que caption.tagger_available(), sans rien importer.
+
+    tagger_available() importe adetailer.autotag, donc PyTorch : 3,3 s à chaque ouverture de l'atelier et à chaque
+    « Actualiser », pour une simple présence. On regarde seulement si les modules existent ; une vraie panne de
+    chargement se dira au moment de légender, avec son message.
+    """
+    import importlib.util
+    try:
+        if importlib.util.find_spec("onnxruntime") is None:
+            return False, "onnxruntime n'est pas installé (pip install onnxruntime)"
+    except (ImportError, ValueError):
+        return False, "onnxruntime n'est pas installé (pip install onnxruntime)"
+    if not LIB.caption._adetailer_on_path():
+        return False, "l'extension ADetailer, qui fournit le tagger WD14, est introuvable"
+    return True, ""
+
+
 # --------------------------------------------------------------------------- commandes
 
 def cmd_info(a):
@@ -151,7 +169,7 @@ def cmd_info(a):
         if root.is_dir():
             cands += [str(x) for x in root.rglob("*.safetensors")]
     cands.sort(key=lambda c: (("anima" not in Path(c).name.lower()), t.dit_kind(c) != "base", Path(c).name.lower()))
-    ok, why = LIB.caption.tagger_available()
+    ok, why = tagger_ready()
     mods = list(a.get("modules") or [])
     if not mods:
         # Forge éteint : les fichiers d'anima à leur place habituelle

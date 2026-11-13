@@ -18,3 +18,21 @@ body { display: flex; flex-direction: column; }
 .ls-gpu { font-size: 12px; color: var(--text-2); -webkit-app-region: no-drag; white-space: nowrap; }
 .ls-gpu b { color: var(--text); font-weight: 600; }
 #ls-main { flex: 1; min-height: 0; overflow: auto; }
+
+/* Barre de VRAM (gpubar.js) : dans la barre de titre, et détaillée dans la carte d'entraînement */
+.gpu-meter { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); white-space: nowrap; -webkit-app-region: no-drag; --gpu: var(--ok); }
+.gpu-meter[data-level="high"] { --gpu: #d08a00; }
+.gpu-meter[data-level="full"] { --gpu: var(--danger); }
+.gpu-meter[data-level="none"] { --gpu: var(--border-2); }
+.gpu-lbl { font-weight: 600; color: var(--text); }
+.gpu-track { position: relative; width: 110px; height: 8px; border-radius: 4px; background: var(--border-2); overflow: hidden; flex: none; }
+.gpu-track > i { display: block; height: 100%; border-radius: 4px; background: var(--gpu); transition: width .6s, background .3s; }
+.gpu-track > u { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--text); opacity: .55; }
+.gpu-track > u[hidden] { display: none; }
+.gpu-txt { font-variant-numeric: tabular-nums; }
+.gpu-meter[data-level="high"] .gpu-txt, .gpu-meter[data-level="full"] .gpu-txt { color: var(--gpu); font-weight: 600; }
+.gpu-meter.detail { flex-wrap: wrap; white-space: normal; }
+.gpu-meter.detail .gpu-track { flex: 1; min-width: 160px; width: auto; height: 10px; border-radius: 5px; }
+.gpu-note { flex-basis: 100%; padding: 7px 10px; border: 1px solid var(--gpu); border-radius: 8px; color: var(--text); font-size: 12.5px; line-height: 1.45; }
+.gpu-note[hidden] { display: none; }
+@media (max-width: 1250px) { #ls-gpu { display: none; } }
