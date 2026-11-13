@@ -1,3 +1,7 @@
+# 1.2.1 — nouvelle icône
+
+- **Nouvelle icône** : un « L » en facettes plates sur fond bleu nuit, de la même famille que le K de KaneApp. Le fût rouge corail est celui du K ; le pied est coupé en deux facettes, jaune et cyan, comme ses deux bras. Chaque taille (16 à 256 px) est dessinée à sa taille pour rester nette dans la barre des tâches.
+
 # 1.2.0 — barre de progression en couleur, thèmes
 
 - **Barre de progression en couleur** pour l'entraînement et le Merge : plus haute, en dégradé (violet, bleu, vert) avec des rayures qui défilent pendant le travail, et le pourcentage à droite. Elle passe au vert quand c'est terminé, au rouge en cas d'erreur, à l'orange si vous arrêtez. Avant le premier pas : « Préparation… ».
