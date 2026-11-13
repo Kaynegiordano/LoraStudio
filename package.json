@@ -1,0 +1,52 @@
+{
+  "name": "lorastudio",
+  "productName": "Lora Studio",
+  "version": "1.0.0",
+  "description": "Lora Studio — entraînement de LoRA et Merge, avec les moteurs de KaneApp",
+  "main": "main.cjs",
+  "private": true,
+  "author": "Kane",
+  "homepage": "https://github.com/Kaynegiordano/LoraStudio",
+  "repository": { "type": "git", "url": "https://github.com/Kaynegiordano/LoraStudio.git" },
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win --x64 --publish never"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
+  "devDependencies": {
+    "electron": "^44.7.2",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.kane.lorastudio",
+    "productName": "Lora Studio",
+    "executableName": "LoraStudio",
+    "copyright": "Kane",
+    "directories": { "output": "dist", "buildResources": "build" },
+    "files": ["main.cjs", "preload.cjs", "updater.cjs", "output-paths.cjs", "managed-runtimes.cjs", "lora_bridge.py", "merge_bridge.py", "app/**/*"],
+    "asarUnpack": ["lora_bridge.py", "merge_bridge.py"],
+    "extraResources": [{ "from": "build/icon.ico", "to": "lorastudio.ico" }],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "build/icon.ico",
+      "artifactName": "LoraStudio-Setup-${version}.${ext}",
+      "signExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Lora Studio",
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "language": "1036"
+    },
+    "publish": [{ "provider": "github", "owner": "Kaynegiordano", "repo": "LoraStudio", "releaseType": "release" }]
+  }
+}

@@ -1,0 +1,20 @@
+/* Lora Studio : la fenêtre (barre de titre avec les deux ateliers) ; les ateliers gardent les styles du Studio de KaneApp. */
+html, body { height: 100%; margin: 0; overflow: hidden; }
+body { display: flex; flex-direction: column; }
+#ls-bar {
+  height: 40px; flex: none; display: flex; align-items: center; gap: 14px; padding: 0 0 0 12px;
+  padding-right: calc(140px + 8px);                       /* boutons Windows (titleBarOverlay) */
+  background: var(--panel); border-bottom: 1px solid var(--border); -webkit-app-region: drag; user-select: none;
+}
+.ls-brand { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; color: var(--text); }
+.ls-brand img { width: 20px; height: 20px; }
+#ls-tabs { display: flex; gap: 2px; -webkit-app-region: no-drag; }
+#ls-tabs button {
+  border: 0; background: transparent; color: var(--text-2); font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 7px; cursor: pointer;
+}
+#ls-tabs button:hover { background: var(--accent-soft); color: var(--text); }
+#ls-tabs button.on { background: var(--accent-soft); color: var(--accent-2); font-weight: 600; }
+.ls-drag { flex: 1; align-self: stretch; }
+.ls-gpu { font-size: 12px; color: var(--text-2); -webkit-app-region: no-drag; white-space: nowrap; }
+.ls-gpu b { color: var(--text); font-weight: 600; }
+#ls-main { flex: 1; min-height: 0; overflow: auto; }
