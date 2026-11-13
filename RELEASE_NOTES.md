@@ -1,3 +1,8 @@
+# 1.1.1 — durée estimée juste en « Taille réelle des images »
+
+- **Durée annoncée trop longue** : avec « Taille réelle des images », la cadence mesurée au dernier entraînement était encore multipliée par 1,4, alors qu'elle avait déjà été mesurée en taille réelle. Exemple : 1 h 52 annoncée pour 1 h 20 réelle.
+- **La durée suit maintenant la taille de vos images** : de très grandes images (3000 × 4096) s'entraînent vers 1280 × 1792, soit 2,2 fois la surface de 1024 px, et non « 40 % de plus ». Le préréglage l'annonce et donne la durée sans « Taille réelle des images » pour comparer.
+
 # 1.1.0 — barre de VRAM, ouverture plus rapide
 
 - **Barre de VRAM** dans la barre de titre, toujours visible : mémoire de la carte graphique utilisée sur le total, relevée toutes les 2 secondes. Verte, orange à partir de 90 %, rouge quand la carte sature.

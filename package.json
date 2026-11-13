@@ -1,7 +1,7 @@
 {
   "name": "lorastudio",
   "productName": "Lora Studio",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Lora Studio — entraînement de LoRA et Merge, avec les moteurs de KaneApp",
   "main": "main.cjs",
   "private": true,

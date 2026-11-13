@@ -498,7 +498,7 @@
         slider('Dimension / alpha du réseau', f, 'dim', 4, 128, 4, '', saveForm), field('Taux d’apprentissage', lr),
         select('Optimiseur', Object.entries(I.optimizers), f, 'optimizer', '', saveForm)),
       h('div.lt-grid3', select('Modules entraînés', Object.entries(I.scopes).map(([k, v]) => [k, v.label]), f, 'scope', 'les parties du modèle que le LoRA a le droit de modifier', v => { scopeHint.innerHTML = F().md(`**${I.scopes[v].summary}** · ${I.scopes[v].hint}`); saveForm(); }),
-        check('Taille réelle des images', f, 'native_res', 'chaque image s’entraîne à sa propre taille (jusqu’à 1536 × 1536), jamais agrandie : le trait est appris à l’échelle où vous générez (1856 × 1024…). Environ 40 % plus long.', saveForm),
+        check('Taille réelle des images', f, 'native_res', 'chaque image s’entraîne à sa propre taille (jusqu’à 1536 × 1536), jamais agrandie : le trait est appris à l’échelle où vous générez (1856 × 1024…). Plus long : la durée suit la surface des images, jusqu’à 2 à 3 fois plus avec de très grandes images. À décocher pour aller vite.', saveForm),
         check('Plusieurs résolutions', f, 'multires', `entraîne en ${I.fewshot_resolutions.join(' / ')} px au lieu d’une seule taille`, saveForm),
         check('Images en miroir', f, 'flip_aug', 'une seconde vue de chaque image, gratuitement. À éviter pour un sujet volontairement asymétrique', saveForm)),
       scopeHint, adv,

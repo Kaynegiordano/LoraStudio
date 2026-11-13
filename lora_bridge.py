@@ -380,10 +380,14 @@ def cmd_preset(a):
     s.save(name, m)
     note = p.fewshot_note(kind, len(images))
     where = " x ".join(f"{x}px" for x in r["resolutions"]) if multires else ("taille réelle des images (jusqu'à 1536 px)" if native else f"{r['resolution']}px")
-    pace = LIB.train.DEFAULT_PACE * 0.94 * (1.4 if native else 1.0)   # encodeur en cache : 1,39 s/pas ; taille réelle : 1,96
+    factor = native_factor(images) if native else 1.0
+    pace = LIB.train.DEFAULT_PACE * 0.94 * factor                      # encodeur en cache : 1,39 s/pas en 1024 px
     status = (f"Préréglage **{p.PRESETS[kind]['label']}** pour {len(images)} image(s) : dimension {r['dim']}, "
               f"taux {r['learning_rate']:.2g}, {r['repeats']} répétitions × {r['epochs']} époques = {r['steps']} pas "
               f"en {where} ({r['passes_per_image']} passages par image), environ {max(1, round(r['steps'] * pace / 60))} min.")
+    if native and factor >= 1.6:
+        status += (f" **Taille réelle : vos images font en moyenne {factor:.1f} fois la surface de 1024 px**, chaque pas coûte d'autant. "
+                   f"Sans « Taille réelle des images » : environ {max(1, round(r['steps'] * LIB.train.DEFAULT_PACE * 0.94 / 60))} min.")
     if r["few_shot"]:
         status += f" Dropout {r['rank_dropout']:.2f}{', images en miroir' if r['flip_aug'] else ''}."
     elif r["caption_dropout_rate"]:
@@ -400,6 +404,46 @@ def cmd_preset(a):
         status += "\n\nRetirés des légendes pour se lier au déclencheur : " + ", ".join(r["removed_tags"][:12]) + more
     return {"manifest": m, "removed_tags": r["removed_tags"], "passes": r["passes_per_image"],
             "resolutions": r["resolutions"], "note": note, "status": status}
+
+
+NATIVE_MAX = 1536 * 1536        # « taille réelle » : sd-scripts ramène chaque image à cette surface au plus, sans l'agrandir
+
+
+def native_factor(images) -> float:
+    """En « taille réelle », surface moyenne réellement entraînée, en multiples de 1024 x 1024 (1 au minimum).
+
+    Le temps d'un pas suit à peu près cette surface. Des images de 3000 x 4096 s'entraînent vers 1280 x 1792, soit
+    2,2 fois la surface de 1024 px : bien plus que les « 40 % de plus » mesurés sur des images de 1856 x 1024.
+    """
+    try:
+        from PIL import Image
+        areas = []
+        for p in images[:400]:
+            try:
+                with Image.open(p) as im:
+                    areas.append(min(im.size[0] * im.size[1], NATIVE_MAX))
+            except Exception:
+                pass
+        return max(1.0, sum(areas) / len(areas) / (1024 * 1024)) if areas else 1.4
+    except Exception:
+        return 1.4
+
+
+def previous_factor(log: Path) -> float:
+    """Surface (en multiples de 1024 px) à laquelle tournait l'entraînement dont on relit la cadence."""
+    try:
+        data = json.loads((log.parent / "run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 1.0
+    if data.get("pixel_factor"):
+        return max(1.0, float(data["pixel_factor"]))
+    s = data.get("settings") or {}
+    if s.get("native_res") and not s.get("multires"):       # entraînement d'avant 1.1.1 : surface non notée, on la remesure
+        try:
+            return native_factor(LIB.store.images_of(data.get("project") or ""))
+        except Exception:
+            return 1.4
+    return 1.0
 
 
 def _median_area(images) -> float:
@@ -483,11 +527,21 @@ def cmd_start(a):
         sample_prompts=sample_file, sample_every_epochs=save_every if sample_file else 0, shuffle_caption=False, scope=scope,
         rank_dropout=float(m.get("rank_dropout") or 0), module_dropout=float(m.get("module_dropout") or 0))
     log = work / "train.log"
-    pace = (t.measured_pace(prev_log) or t.DEFAULT_PACE) * (1.4 if native else 1.0)   # mesuré : 1,96 s/pas contre 1,39
+    # Durée estimée. La cadence mesurée au dernier entraînement vaut pour la taille d'images de ce jour-là : on ne la
+    # corrige que si la taille a changé depuis (avant, « taille réelle » la multipliait encore par 1,4 alors qu'elle
+    # avait déjà été mesurée en taille réelle : 1 h 52 annoncée pour 1 h 20).
+    factor = native_factor(images) if native else 1.0
+    # un entraînement arrêté avant son premier pas n'a rien mesuré : on remonte au dernier qui l'a fait
+    measured = None
+    for prev_log in [prev_log] + [rf.parent / "train.log" for rf in runs_of(name)]:
+        measured = t.measured_pace(prev_log)
+        if measured:
+            break
+    pace = measured * factor / previous_factor(prev_log) if measured else t.DEFAULT_PACE * factor
     (work / "command.txt").write_text("\n".join(command), encoding="utf-8")
     record = {"id": run_id, "project": name, "started_at": datetime.now(timezone.utc).isoformat(), "settings": m,
               "command": command, "output": str(out_dir / f"{trigger}.safetensors"), "stopped": False, "pid": None,
-              "launched_by": "kanevas", "token": token, "kind": kind}
+              "launched_by": "kanevas", "token": token, "kind": kind, "pixel_factor": round(factor, 3)}
     s.atomic_json(work / "run.json", record)
     proc = t.launch(command, cwd=sd, log_path=log)
     record["pid"] = proc.pid

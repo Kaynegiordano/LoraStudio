@@ -93,6 +93,20 @@ side = json.loads((tmp / "Lora" / "Anima" / "n1x3u_2.json").read_text(encoding="
 check(r["name"] == "n1x3u_2" and (tmp / "Lora" / "Anima" / "n1x3u.safetensors").read_bytes() == b"ancien" and side["activation text"] == "@n1x3u" and side["preferred weight"] == 1.0
       and (tmp / "Lora" / "Anima" / "n1x3u_2.png").is_file(), "Garder une version : copiée en n1x3u_2 (l'existant intact), fiche @n1x3u poids 1, image")
 
+# durée estimée en « taille réelle » : elle suit la surface des images, et une cadence déjà mesurée en taille réelle n'est pas recomptée
+from PIL import Image
+big = tmp / "big"; big.mkdir()
+Image.new("RGB", (3000, 4096)).save(big / "a.jpg")       # ramenée à 1536² par sd-scripts : 2,25 fois 1024²
+Image.new("RGB", (1024, 1024)).save(big / "b.jpg")
+f = B.native_factor(sorted(big.iterdir()))
+check(abs(f - (2.25 + 1) / 2) < 0.01, f"Taille réelle : surface moyenne entraînée = {f:.2f} fois 1024 px (grande image plafonnée à 1536²)")
+check(B.native_factor([tmp / "absent.png"]) == 1.4, "Taille réelle : images illisibles = l'ancienne estimation (1,4)")
+prev = tmp / "prev"; prev.mkdir()
+(prev / "run.json").write_text(json.dumps({"pixel_factor": 2.2, "settings": {"native_res": True}}), encoding="utf-8")
+check(B.previous_factor(prev / "train.log") == 2.2, "Cadence mesurée : la surface de l'entraînement précédent est relue dans son run.json")
+(prev / "run.json").write_text(json.dumps({"settings": {"native_res": False}}), encoding="utf-8")
+check(B.previous_factor(prev / "train.log") == 1.0 and B.previous_factor(tmp / "rien" / "train.log") == 1.0, "Cadence mesurée en 1024 px, ou sans run.json : facteur 1")
+
 import shutil
 shutil.rmtree(tmp, ignore_errors=True)
 print("Tout est bon" if not fails else f"{fails} échec(s)")
