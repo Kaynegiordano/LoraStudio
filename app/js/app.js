@@ -54,6 +54,7 @@
   // état du moteur de KaneApp, relu quand la fenêtre revient au premier plan et toutes les 15 s quand elle est visible
   async function refreshGpu() {
     const r = await KS.engineCheck();
+    KS.forgeOwn = r && r.up ? r.own || 0 : 0;              // octets réservés par le moteur de KaneApp (libérés avant un entraînement)
     gpu.innerHTML = r && r.up ? `Moteur de KaneApp : <b>${r.loaded ? 'modèle chargé' : 'démarré, sans modèle'}</b>` + (r.loaded ? ' — libéré avant chaque entraînement' : '')
       : 'Moteur de KaneApp : <b>arrêté</b>';
   }

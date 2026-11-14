@@ -21,7 +21,9 @@ window.ksNative = {
       resolutions: [512,1024], optimizers: { adamw8bit: 'AdamW' }, dits: [], fewshot_resolutions: [512,1024], sd_scripts: 'C:/training', tagger: true };
     if (cmd === 'list') return { ok: true, projects: window.loraImages.length ? [{ name: 'Import-test', count: window.loraImages.length }] : [] };
     if (cmd === 'import') { window.loraImages.push(...args.paths.map(p => ({file: p.split('/').pop(),path:p}))); return {ok:true,name:'Import-test',added:args.paths.length,count:window.loraImages.length}; }
-    if (cmd === 'load') return { ok:true,manifest:{ trigger: 'n1x3u', lora_type: 'style', captions: window.loraCaps || {} },images:window.loraImages,runs:window.loraRun ? [window.loraRun] : [], suggest: window.loraSuggest || null };
+    if (cmd === 'load') return { ok:true,manifest:{ trigger: 'n1x3u', lora_type: 'style', captions: window.loraCaps || {} },images:window.loraImages,runs:window.loraRun ? [window.loraRun] : [], suggest: window.loraSuggest || null, vram: window.loraVram || null };
+    if (cmd === 'audit') return { ok: true, count: 3, target: 1024, issues: window.loraAudit || [] };
+    if (cmd === 'remove') { (window.loraRemoved ||= []).push(...args.files); return { ok: true, removed: args.files.length }; }
     if (cmd === 'save') { (window.loraSaves ||= []).push(args); if (args.patch && args.patch.captions) window.loraCaps = { ...args.patch.captions }; return { ok: true }; }
     if (cmd === 'start') { (window.loraStarts ||= []).push(args); return { ok: true, pid: 7, run: 'C:/runs/' + args.name, total: 100, per_epoch: 10, resolutions: [1024], estimate_s: 600, output: 'C:/out/x.safetensors', count: 2, token: '@n1x3u' }; }
     if (cmd === 'install') { (window.loraInstalls ||= []).push(args); return { ok: true, installed: 'C:/Lora/Anima/' + args.name + '.safetensors', name: args.name }; }
@@ -38,7 +40,7 @@ window.ksNative = {
 async function scenario() {
   const results = [];
   const assert = (ok, message) => { if (!ok) throw new Error(message); results.push(message); };
-  const wait = async test => { for (let i = 0; i < 150; i++) { if (test()) return; await new Promise(r => setTimeout(r, 20)); } throw new Error('Timeout'); };
+  const wait = async (test, what = '') => { for (let i = 0; i < 150; i++) { if (test()) return; await new Promise(r => setTimeout(r, 20)); } throw new Error('Timeout après : ' + (results.at(-1) || 'début') + ' — ' + test.toString().slice(0, 140)); };
   const c = document.createElement('canvas'); c.width = 8; c.height = 8;
   const bytes = new Uint8Array(await (await new Promise(r => c.toBlob(r, 'image/png'))).arrayBuffer());
   await wait(() => !!document.querySelector('.lt-drop'));
@@ -120,6 +122,9 @@ async function scenario() {
   window.loraRun = null; KS.trainTab.invalidate(); await wait(() => !!document.querySelector('.lt-start') && !document.querySelector('.lt-ep'));
   const starts = (window.loraStarts || []).length;
   document.querySelector('.lt-start').click();
+  await wait(() => !!document.querySelector('.modal'));
+  assert(document.querySelector('.modal').textContent.includes('VRAM insuffisante'), 'Lancer avec 8,8 Go déjà pris : la VRAM ne suffit pas, confirmation demandée');
+  [...document.querySelectorAll('.modal button')].find(b => b.textContent === 'Lancer quand même').click();
   await wait(() => (window.loraStarts || []).length === starts + 1 && /déjà occupés/.test(document.querySelector('[data-msg="train"]').textContent));
   assert(KS.gpu.peak === 9000 && document.querySelector('[data-msg="train"]').textContent.includes('8,8 Go de VRAM sont déjà occupés'), 'Lancer : le pic repart de zéro et 8,8 Go déjà pris sont signalés');
   window.gpuPush(null);
@@ -169,6 +174,42 @@ async function scenario() {
   assert(powerBox.closest('label').title.includes('Lora Studio doit rester ouvert') && !document.querySelector('.lt-card').textContent.includes('Forge reloads'), 'Textes : Lora Studio (et non KaneApp) doit rester ouvert');
   powerBox.click();
   assert(!window.closeGuard, 'Fermeture : plus rien à perdre, plus de question');
+  // VRAM : estimation avant de lancer, ajustements proposés, confirmation si elle ne suffit pas
+  KS.prefs.loraQueue = []; window.loraRun = null; window.loraVram = { native_factor: 2.2, measured: null };
+  window.gpuPush({ used: 1000, total: 16303, util: 3, temp: 40, name: 'RTX', shared: 70, level: 'ok' });
+  KS.trainTab.invalidate(); await wait(() => !!document.querySelector('.lt-vplan'));
+  const plan = () => document.querySelector('.lt-vplan');
+  assert(!plan().classList.contains('short') && plan().textContent.includes('≈ 13,0 Go') && plan().textContent.includes('14,9 Go'), 'VRAM : 1024 px ≈ 13 Go, assez de place : ' + plan().textContent.slice(0, 80));
+  const nativeBox = [...document.querySelectorAll('.fx-check')].find(l => l.textContent.includes('Taille réelle')).querySelector('input');
+  nativeBox.click(); await wait(() => plan() && plan().classList.contains('short'));   // sans nouveau rendu : l'estimation suit la case
+  assert(plan().textContent.includes('≈ 17,8 Go') && plan().textContent.includes('ne suffira pas'), 'VRAM : taille réelle de grandes images ≈ 17,8 Go, signalée trop juste');
+  const startsBefore = (window.loraStarts || []).length;
+  document.querySelector('.lt-start').click();
+  await wait(() => !!document.querySelector('.modal'));
+  assert(document.querySelector('.modal').textContent.includes('VRAM insuffisante'), 'VRAM : lancer quand elle ne suffit pas demande confirmation');
+  [...document.querySelectorAll('.modal button')].find(b => b.textContent === 'Ajuster les réglages').click();
+  await new Promise(r => setTimeout(r, 150));
+  assert((window.loraStarts || []).length === startsBefore, 'VRAM : « Ajuster les réglages » ne lance rien');
+  [...plan().querySelectorAll('button')].find(b => b.textContent.includes('Décocher')).click();
+  await wait(() => plan() && !plan().classList.contains('short'));
+  await wait(() => (window.loraSaves || []).some(x => x.patch && x.patch.native_res === false));   // enregistrement différé de 0,6 s
+  assert((window.loraSaves || []).some(x => x.patch && x.patch.native_res === false), 'VRAM : « Décocher Taille réelle » corrige et enregistre le réglage');
+  window.loraVram = { native_factor: 2.2, measured: { peak_mb: 11264, factor: 1 } };
+  KS.trainTab.invalidate(); await wait(() => plan() && plan().textContent.includes('dernier entraînement mesuré'));
+  assert(plan().textContent.includes('≈ 11,0 Go'), 'VRAM : un pic déjà mesuré sur cette carte remplace l’estimation de départ');
+  window.loraVram = null;
+  // Vérifier les images : remarques listées, « Retirer » retire la bonne image
+  window.loraAudit = [{ kind: 'dup', files: ['training-b.png', 'training-a.png'], text: 'presque identique à training-a.png' },
+    { kind: 'mark', files: ['picked.png'], text: 'filigrane ou signature (signature)' }];
+  [...document.querySelectorAll('button')].find(b => b.textContent === 'Vérifier les images').click();
+  await wait(() => document.querySelectorAll('.lt-issue').length === 2);
+  const issues = [...document.querySelectorAll('.lt-issue')];
+  assert(issues[0].textContent.includes('Doublon') && issues[1].textContent.includes('Filigrane') && !issues[1].querySelector('button'), 'Images : doublon et filigrane listés ; un filigrane se rogne, pas de bouton Retirer');
+  issues[0].querySelector('button').click();
+  await wait(() => !!document.querySelector('.modal'));
+  [...document.querySelectorAll('.modal button')].find(b => b.textContent === 'Retirer').click();
+  await wait(() => (window.loraRemoved || []).length === 1);
+  assert(window.loraRemoved[0] === 'training-b.png', 'Images : « Retirer » sur un doublon retire la copie, pas l’original');
   // Thèmes : Sombre, Système, Bleu, Clair ; le choix est retenu et la barre de titre suit
   const btn = document.querySelector('.ls-theme');
   btn.click(); await new Promise(r => setTimeout(r, 50));

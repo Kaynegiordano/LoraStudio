@@ -5,7 +5,7 @@
 (() => {
   const h = KS.h, N = KS.native;
   const meters = new Set();
-  const G = KS.gpu = { last: null, peak: 0 };
+  const G = KS.gpu = { last: null, peak: 0, listeners: new Set() };
   const go = mib => (mib / 1024).toFixed(1).replace('.', ',');
   const LABEL = { ok: '', high: 'presque pleine', full: 'saturée' };
 
@@ -55,6 +55,7 @@
     G.last = s || null;
     if (s && s.used > G.peak) G.peak = s.used;
     paint();
+    for (const fn of G.listeners) { try { fn(G.last); } catch { /* un abonné en panne n'arrête pas les autres */ } }
   };
   G.meter = ({ detail = false } = {}) => {
     const fill = h('i'), peak = h('u', { hidden: true }), txt = h('span.gpu-txt'), note = detail ? h('div.gpu-note', { hidden: true }) : null;

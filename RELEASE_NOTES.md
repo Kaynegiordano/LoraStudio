@@ -1,3 +1,10 @@
+# 1.4.0 — VRAM estimée avant de lancer, vérification des images, Merge économe
+
+- **VRAM estimée avant de lancer** : la carte d'entraînement indique la mémoire nécessaire et celle disponible, et suit les réglages en direct. Quand elle ne suffira pas, des boutons proposent de corriger (décocher « Taille réelle », passer en 768 px, une seule résolution), et le lancement demande confirmation. L'estimation part de valeurs prudentes, puis du pic réellement mesuré lors de votre dernier entraînement.
+- **Vérifier les images** (carte Projet) : doublons, images trop petites ou très allongées, filigranes et signatures repérés dans les légendes, fichiers illisibles. Un doublon ou une image trop petite se retire d'un clic.
+- **Merge économe en mémoire** : les checkpoints sont lus et écrits couche par couche. Mémoire réservée mesurée sur ANIMA : 16,4 → 2,8 Go pour deux checkpoints, 8,9 → 1,7 Go pour le tout-en-un. Résultats identiques au bit près.
+- **Corrigé** : les boîtes de confirmation ne s'ouvraient pas (supprimer un projet, retirer une image, arrêter et relancer).
+
 # 1.3.0 — relecture complète : corrections et confort
 
 - **Légendes enregistrées toutes seules** après une correction à la main : plus de légende perdue en changeant de projet ou en lançant l'entraînement sans cliquer « Enregistrer ».

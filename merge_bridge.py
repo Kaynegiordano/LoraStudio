@@ -19,6 +19,8 @@ Commandes
                                                      method « svd »    : somme recompressée au rang demandé
 
 Aucun fichier d'entrée n'est modifié ; le résultat est écrit dans `out` (via un fichier .tmp renommé à la fin).
+Les checkpoints sont écrits couche par couche (StreamWriter) : la mémoire vive ne garde qu'une couche à la fois, au lieu
+du modèle entier (plusieurs Go pour SDXL ou ANIMA avec VAE et encodeur intégrés).
 """
 import json
 import math
@@ -110,34 +112,125 @@ def out_dtype(torch, name, source=None):
     return {'bf16': torch.bfloat16, 'fp16': torch.float16, 'fp32': torch.float32}.get(name, source or torch.bfloat16)
 
 
-def embed_components(out, job, arch, torch):
-    """VAE et encodeur de texte dans le checkpoint, aux préfixes que Forge relit (`vae.` et `text_encoders.qwen3_06b.transformer.`) :
-    le fichier se charge sans choisir de module à côté. ANIMA seulement (c'est la disposition vérifiée)."""
-    from safetensors import safe_open
+# Types safetensors : octets par valeur, et type torch correspondant
+ST_SIZE = {'F64': 8, 'F32': 4, 'F16': 2, 'BF16': 2, 'I64': 8, 'I32': 4, 'I16': 2, 'I8': 1, 'U8': 1, 'BOOL': 1, 'F8_E4M3': 1, 'F8_E5M2': 1}
+FLOATS = {'F64', 'F32', 'F16', 'BF16'}
+
+
+def st_torch(torch, name):
+    return {'F64': torch.float64, 'F32': torch.float32, 'F16': torch.float16, 'BF16': torch.bfloat16, 'I64': torch.int64, 'I32': torch.int32,
+            'I16': torch.int16, 'I8': torch.int8, 'U8': torch.uint8, 'BOOL': torch.bool}.get(name)
+
+
+def st_out(name, source):
+    """Type de sortie d'un tenseur : la précision demandée pour les flottants, le type d'origine pour le reste."""
+    if source not in FLOATS:
+        return source
+    return {'bf16': 'BF16', 'fp16': 'F16', 'fp32': 'F32'}.get(name, source)
+
+
+class StreamWriter:
+    """Fichier safetensors écrit tenseur après tenseur : l'en-tête (noms, types, formes, positions) est connu d'avance,
+    les données suivent dans le même ordre. Seule la couche en cours de calcul est en mémoire."""
+
+    def __init__(self, path, plan, recipe):
+        self.path, self.tmp, self.plan = path, path + '.tmp', plan
+        head, off = {'__metadata__': {'kane_merge': json.dumps(recipe, ensure_ascii=False)}}, 0
+        for key, dt, shape in plan:
+            n = ST_SIZE[dt] * math.prod(shape)
+            head[key] = {'dtype': dt, 'shape': list(shape), 'data_offsets': [off, off + n]}
+            off += n
+        raw = json.dumps(head, separators=(',', ':')).encode('utf-8')
+        raw += b' ' * (-len(raw) % 8)
+        self.size = 8 + len(raw) + off
+        d = os.path.dirname(path) or '.'
+        os.makedirs(d, exist_ok=True)
+        if shutil.disk_usage(d).free < self.size * 1.02 + 50_000_000:
+            raise RuntimeError(f'Pas assez de place sur le disque ({self.size / 2**30:.1f} Go nécessaires)')
+        self.f = open(self.tmp, 'wb')
+        self.f.write(struct.pack('<Q', len(raw))); self.f.write(raw)
+        self.i = 0
+
+    def write(self, torch, t):
+        key, dt, shape = self.plan[self.i]
+        t = t.to(st_torch(torch, dt)) if st_torch(torch, dt) is not None and t.dtype != st_torch(torch, dt) else t
+        if list(t.shape) != list(shape):
+            raise RuntimeError(f'Forme inattendue pour {key} : {list(t.shape)} au lieu de {list(shape)}')
+        self.f.write(t.detach().cpu().contiguous().view(-1).view(torch.uint8).numpy().tobytes())
+        self.i += 1
+
+    def close(self):
+        self.f.close()
+        if self.i != len(self.plan):
+            raise RuntimeError(f'Fichier incomplet : {self.i} tenseurs écrits sur {len(self.plan)}')
+        os.replace(self.tmp, self.path)
+        return os.path.getsize(self.path)
+
+    def abort(self):
+        try: self.f.close()
+        except Exception: pass
+        try: os.remove(self.tmp)
+        except OSError: pass
+
+
+def stream(path_out, plan, produce, recipe, torch, text='Couche'):
+    """plan : [(clé, type, forme)] ; produce(i) rend le tenseur i. Progression 0 → 97 %."""
+    w = StreamWriter(path_out, plan, recipe)
+    try:
+        n = len(plan)
+        for i in range(n):
+            if i % 12 == 0: progress(97 * i / n, f'{text} {i + 1} / {n}')
+            w.write(torch, produce(i))
+        return w.close()
+    except BaseException:
+        w.abort()
+        raise
+
+
+def embed_plan(job, arch, dtype_name):
+    """VAE et encodeur de texte à ajouter au checkpoint : entrées du plan et préfixes à retirer de la base. Contrôles
+    sur les en-têtes seulement, avant d'écrire quoi que ce soit."""
     emb = job.get('embed') or {}
-    if not emb.get('vae') and not emb.get('text_encoder'): return []
+    if not emb.get('vae') and not emb.get('text_encoder'): return [], [], []
     if arch != 'anima': raise ValueError('Intégrer le VAE et l’encodeur est prévu pour les checkpoints ANIMA (architecture détectée : ' + arch + ').')
-    done = []
-    def put(path, prefix, check):
-        with safe_open(path, framework='pt', device='cpu') as f:
-            keys = list(f.keys()); check(f, keys)
-            for k in [k for k in out if k.startswith(prefix)]: del out[k]
-            for k in keys:
-                x = f.get_tensor(k)
-                out[prefix + k] = x.to(out_dtype(torch, job.get('dtype', 'source'), x.dtype)) if x.is_floating_point() else x
-    def check_vae(f, keys):
-        if 'decoder.middle.0.residual.0.gamma' not in keys: raise ValueError('« ' + os.path.basename(emb['vae']) + ' » n’est pas un VAE Wan 2.1 / Qwen-Image, celui d’ANIMA.')
-    def check_te(f, keys):
-        if 'model.layers.0.post_attention_layernorm.weight' not in keys or f.get_slice('model.layers.0.post_attention_layernorm.weight').get_shape()[0] != 1024 or 'model.layers.0.self_attn.q_norm.weight' not in keys:
+    entries, prefixes, done = [], [], []
+    if emb.get('vae'):
+        h = header(emb['vae']); h.pop('__metadata__', None)
+        if 'decoder.middle.0.residual.0.gamma' not in h: raise ValueError('« ' + os.path.basename(emb['vae']) + ' » n’est pas un VAE Wan 2.1 / Qwen-Image, celui d’ANIMA.')
+        prefixes.append('vae.'); done.append(os.path.basename(emb['vae']))
+        entries += [('vae.' + k, st_out(dtype_name, v['dtype']), v['shape'], emb['vae'], k) for k, v in h.items()]
+    if emb.get('text_encoder'):
+        h = header(emb['text_encoder']); h.pop('__metadata__', None)
+        ln = h.get('model.layers.0.post_attention_layernorm.weight')
+        if not ln or ln['shape'][0] != 1024 or 'model.layers.0.self_attn.q_norm.weight' not in h:
             raise ValueError('« ' + os.path.basename(emb['text_encoder']) + ' » n’est pas l’encodeur Qwen3 0.6B d’ANIMA.')
-    if emb.get('vae'): progress(92, 'Intégration du VAE…'); put(emb['vae'], 'vae.', check_vae); done.append(os.path.basename(emb['vae']))
-    if emb.get('text_encoder'): progress(94, 'Intégration de l’encodeur de texte…'); put(emb['text_encoder'], 'text_encoders.qwen3_06b.transformer.', check_te); done.append(os.path.basename(emb['text_encoder']))
-    return done
+        pre = 'text_encoders.qwen3_06b.transformer.'
+        prefixes.append(pre); done.append(os.path.basename(emb['text_encoder']))
+        entries += [(pre + k, st_out(dtype_name, v['dtype']), v['shape'], emb['text_encoder'], k) for k, v in h.items()]
+    return entries, prefixes, done
 
 
-def arch_of_file(path):
-    h = header(path); h.pop('__metadata__', None)
-    return arch_of(list(h), False)
+class Readers:
+    """Fichiers safetensors relus couche par couche, directement à leur position dans le fichier.
+
+    safe_open projette le fichier entier en mémoire : sous Windows, cette projection réserve toute la taille du fichier
+    (4 à 6 Go par checkpoint ANIMA) même si l'on ne garde qu'une couche. Ici, seule la couche lue occupe la mémoire."""
+    def __init__(self):
+        self.heads, self.files = {}, {}
+
+    def get(self, path, key):
+        import torch
+        if path not in self.heads:
+            f = open(path, 'rb'); n = struct.unpack('<Q', f.read(8))[0]
+            self.heads[path] = (json.loads(f.read(n)), 8 + n); self.files[path] = f
+        head, base = self.heads[path]
+        v = head[key]; a, b = v['data_offsets']; dt = st_torch(torch, v['dtype'])
+        if dt is None:                                       # type rare (fp8…) : on laisse safetensors le lire
+            from safetensors import safe_open
+            with safe_open(path, framework='pt', device='cpu') as g: return g.get_tensor(key)
+        f = self.files[path]; f.seek(base + a); buf = bytearray(f.read(b - a))
+        t = torch.frombuffer(buf, dtype=dt) if buf else torch.empty(0, dtype=dt)
+        return t.reshape(v['shape'])
 
 
 def finish(path_out, tensors, recipe, torch):
@@ -160,16 +253,13 @@ FAMILY = re.compile(r'(blocks|layers|input_blocks|output_blocks|double_blocks|si
 
 def merge_checkpoints(job):
     torch, dev = torch_ctx()
-    from safetensors import safe_open
-    models = job['models']; mode = job.get('mode', 'sum')
+    models = job['models']; mode = job.get('mode', 'sum'); dname = job.get('dtype', 'source')
     if len(models) < 2 or (mode == 'diff' and len(models) < 3): raise ValueError('Il manque un modèle pour ce mode.')
     a0 = float(job.get('alpha', 0.5)); a1 = job.get('alpha_end'); a1 = None if a1 is None else float(a1)
-    files = [safe_open(p, framework='pt', device='cpu') for p in models]
-    A = files[0]; keysA = list(A.keys())
-    maps = [{norm(k): k for k in f.keys()} for f in files[1:]]
     head = [header(p) for p in models]
     for h in head: h.pop('__metadata__', None)
-    # dégradé le long des blocs : indice et plus grand indice de la famille
+    hA = head[0]; keysA = list(hA)
+    maps = [{norm(k): k for k in h} for h in head[1:]]
     top = {}
     for k in keysA:
         m = FAMILY.search(norm(k))
@@ -181,31 +271,44 @@ def merge_checkpoints(job):
         if not m: return (a0 + a1) / 2
         return a0 + (a1 - a0) * int(m.group(2)) / max(1, top[m.group(1)])
 
-    out, total, hit, skipped = {}, 0, 0, 0
-    n = len(keysA); t0 = time.time()
-    for i, k in enumerate(keysA):
-        if i % 12 == 0: progress(90 * i / n, f'Couche {i + 1} / {n}')
-        ta = A.get_tensor(k); nk = norm(k)
-        dtype = out_dtype(torch, job.get('dtype', 'source'), ta.dtype)
-        if not ta.is_floating_point():
-            out[k] = ta; continue
+    # tout est décidé sur les en-têtes, avant d'écrire : couches communes, et refus d'architectures incompatibles
+    need = 2 if mode == 'diff' else 1
+    todo, total, hit = [], 0, 0
+    for k in keysA:
+        nk = norm(k); v = hA[k]
+        if v['dtype'] not in FLOATS:
+            todo.append((k, v, None)); continue
         total += 1
-        parts = []
-        for j, (mp, f) in enumerate(zip(maps, files[1:]), start=1):
+        src = []
+        for mp, h in zip(maps, head[1:]):
             kk = mp.get(nk)
-            parts.append(f.get_tensor(kk) if kk is not None and list(head[j][kk]['shape']) == list(ta.shape) else None)
+            src.append(kk if kk is not None and list(h[kk]['shape']) == list(v['shape']) else None)
         al = alpha_for(nk)
-        if any(p is None for p in parts[:(2 if mode == 'diff' else 1)]) or (mode == 'sum' and al == 0):
-            out[k] = ta.to(dtype); skipped += any(p is None for p in parts); continue
-        x = ta.to(dev, torch.float32)
-        if mode == 'diff': x = x + al * (parts[0].to(dev, torch.float32) - parts[1].to(dev, torch.float32))
-        else: x = x * (1 - al) + parts[0].to(dev, torch.float32) * al
-        out[k] = x.to(dtype).cpu(); hit += 1
+        ok = all(x is not None for x in src[:need]) and not (mode == 'sum' and al == 0)
+        hit += ok
+        todo.append((k, v, (src, al) if ok else None))
     if total == 0 or hit / total < 0.5:
         raise ValueError(f'Architectures incompatibles : seulement {hit} couches sur {total} existent dans les deux modèles.')
-    embedded = embed_components(out, job, arch_of_file(models[0]), torch)
-    recipe = {'type': 'checkpoints', 'embedded': embedded, 'mode': mode, 'models': [os.path.basename(p) for p in models], 'alpha': a0, 'alpha_end': a1, 'dtype': job.get('dtype', 'source')}
-    size = finish(job['out'], out, recipe, torch)
+    extra, drop, embedded = embed_plan(job, arch_of(keysA, False), dname)
+    todo = [t for t in todo if not any(t[0].startswith(p) for p in drop)]
+    plan = [(k, st_out(dname, v['dtype']), v['shape']) for k, v, _ in todo] + [(e[0], e[1], e[2]) for e in extra]
+    R = Readers(); t0 = time.time()
+
+    def produce(i):
+        if i >= len(todo):
+            e = extra[i - len(todo)]; return R.get(e[3], e[4])
+        k, v, work = todo[i]
+        ta = R.get(models[0], k)
+        if work is None: return ta
+        src, al = work
+        x = ta.to(dev, torch.float32)
+        b = R.get(models[1], src[0]).to(dev, torch.float32)
+        if mode == 'diff': x = x + al * (b - R.get(models[2], src[1]).to(dev, torch.float32))
+        else: x = x * (1 - al) + b * al
+        return x
+
+    recipe = {'type': 'checkpoints', 'embedded': embedded, 'mode': mode, 'models': [os.path.basename(p) for p in models], 'alpha': a0, 'alpha_end': a1, 'dtype': dname}
+    size = stream(job['out'], plan, produce, recipe, torch)
     return {'size': size, 'embedded': embedded, 'layers': total, 'merged': hit, 'kept': total - hit, 'seconds': round(time.time() - t0, 1)}
 
 
@@ -231,9 +334,7 @@ def scale_of(m):
 
 def lora_into_checkpoint(job):
     torch, dev = torch_ctx()
-    from safetensors import safe_open
-    f = safe_open(job['model'], framework='pt', device='cpu'); keys = list(f.keys())
-    head = header(job['model']); head.pop('__metadata__', None)
+    head = header(job['model']); head.pop('__metadata__', None); keys = list(head)
     nmap = {norm(k): k for k in keys}
     kohya = {}
     for nk, k in nmap.items():
@@ -241,7 +342,7 @@ def lora_into_checkpoint(job):
         stem = nk[:-7]
         kohya['lora_unet_' + stem.replace('.', '_')] = k
         if nk.startswith('cond_stage_model.transformer.'): kohya['lora_te_' + nk[len('cond_stage_model.transformer.'):-7].replace('.', '_')] = k
-    plan, report = {}, []
+    plan_l, report = {}, []
     for li, spec in enumerate(job['loras']):
         mods, bad = load_lora(spec['path']); w = float(spec.get('weight', 1.0)); miss = []
         for base, m in mods.items():
@@ -251,24 +352,29 @@ def lora_into_checkpoint(job):
                 k = nmap.get(b + '.weight')
             if k is None or int(math.prod(head[k]['shape'])) != int(m['up'].reshape(m['up'].shape[0], -1).shape[0] * m['down'].reshape(m['down'].shape[0], -1).shape[1]):
                 miss.append(base); continue
-            plan.setdefault(k, []).append((m, w))
+            plan_l.setdefault(k, []).append((m, w))
         report.append({'name': os.path.basename(spec['path']), 'modules': len(mods), 'applied': len(mods) - len(miss), 'unmatched': miss[:5], 'unsupported': bad})
         if mods and len(miss) == len(mods): raise ValueError(f"« {os.path.basename(spec['path'])} » ne correspond à aucune couche de ce checkpoint (autre architecture ?).")
-    out = {}; n = len(keys); t0 = time.time()
-    for i, k in enumerate(keys):
-        if i % 12 == 0: progress(90 * i / n, f'Couche {i + 1} / {n}')
-        t = f.get_tensor(k); dtype = out_dtype(torch, job.get('dtype', 'source'), t.dtype)
-        if k in plan and t.is_floating_point():
-            x = t.to(dev, torch.float32)
-            for m, w in plan[k]:
-                up = m['up'].to(dev, torch.float32); dn = m['down'].to(dev, torch.float32)
-                x = x + (w * scale_of(m)) * (up.reshape(up.shape[0], -1) @ dn.reshape(dn.shape[0], -1)).reshape(x.shape)
-            out[k] = x.to(dtype).cpu()
-        else: out[k] = t.to(dtype) if t.is_floating_point() else t
-    embedded = embed_components(out, job, arch_of_file(job['model']), torch)
-    recipe = {'type': 'lora_into_checkpoint', 'embedded': embedded, 'model': os.path.basename(job['model']), 'loras': [{'name': os.path.basename(s['path']), 'weight': s.get('weight', 1.0)} for s in job['loras']], 'dtype': job.get('dtype', 'source')}
-    size = finish(job['out'], out, recipe, torch)
-    return {'size': size, 'embedded': embedded, 'report': report, 'applied': len(plan), 'seconds': round(time.time() - t0, 1)}
+    dname = job.get('dtype', 'source')
+    extra, drop, embedded = embed_plan(job, arch_of(keys, False), dname)
+    keys = [k for k in keys if not any(k.startswith(p) for p in drop)]
+    plan = [(k, st_out(dname, head[k]['dtype']), head[k]['shape']) for k in keys] + [(e[0], e[1], e[2]) for e in extra]
+    R = Readers(); t0 = time.time()
+
+    def produce(i):
+        if i >= len(keys):
+            e = extra[i - len(keys)]; return R.get(e[3], e[4])
+        k = keys[i]; t = R.get(job['model'], k)
+        if k not in plan_l or not t.is_floating_point(): return t
+        x = t.to(dev, torch.float32)
+        for m, w in plan_l[k]:
+            up = m['up'].to(dev, torch.float32); dn = m['down'].to(dev, torch.float32)
+            x = x + (w * scale_of(m)) * (up.reshape(up.shape[0], -1) @ dn.reshape(dn.shape[0], -1)).reshape(x.shape)
+        return x
+
+    recipe = {'type': 'lora_into_checkpoint', 'embedded': embedded, 'model': os.path.basename(job['model']), 'loras': [{'name': os.path.basename(s['path']), 'weight': s.get('weight', 1.0)} for s in job['loras']], 'dtype': dname}
+    size = stream(job['out'], plan, produce, recipe, torch)
+    return {'size': size, 'embedded': embedded, 'report': report, 'applied': len(plan_l), 'seconds': round(time.time() - t0, 1)}
 
 
 def merge_loras(job):
@@ -316,17 +422,16 @@ def merge_loras(job):
 
 def embed_only(job):
     torch, _dev = torch_ctx()
-    from safetensors import safe_open
     if not (job.get('embed') or {}).get('vae') and not (job.get('embed') or {}).get('text_encoder'): raise ValueError('Choisissez un VAE et/ou un encodeur de texte à intégrer.')
-    t0 = time.time(); out = {}
-    with safe_open(job['model'], framework='pt', device='cpu') as f:
-        keys = list(f.keys())
-        for i, k in enumerate(keys):
-            if i % 40 == 0: progress(88 * i / len(keys), f'Couche {i + 1} / {len(keys)}')
-            x = f.get_tensor(k); out[k] = x.to(out_dtype(torch, job.get('dtype', 'source'), x.dtype)) if x.is_floating_point() else x
-    embedded = embed_components(out, job, arch_of_file(job['model']), torch)
-    recipe = {'type': 'embed', 'model': os.path.basename(job['model']), 'embedded': embedded, 'dtype': job.get('dtype', 'source')}
-    size = finish(job['out'], out, recipe, torch)
+    dname = job.get('dtype', 'source')
+    head = header(job['model']); head.pop('__metadata__', None)
+    extra, drop, embedded = embed_plan(job, arch_of(list(head), False), dname)
+    keys = [k for k in head if not any(k.startswith(p) for p in drop)]
+    plan = [(k, st_out(dname, head[k]['dtype']), head[k]['shape']) for k in keys] + [(e[0], e[1], e[2]) for e in extra]
+    R = Readers(); t0 = time.time()
+    produce = lambda i: R.get(job['model'], keys[i]) if i < len(keys) else R.get(extra[i - len(keys)][3], extra[i - len(keys)][4])
+    recipe = {'type': 'embed', 'model': os.path.basename(job['model']), 'embedded': embedded, 'dtype': dname}
+    size = stream(job['out'], plan, produce, recipe, torch)
     return {'size': size, 'embedded': embedded, 'seconds': round(time.time() - t0, 1)}
 
 

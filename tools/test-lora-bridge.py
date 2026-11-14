@@ -114,6 +114,26 @@ check(B.french("Loading models and caching latents...") == "Chargement des modè
 err = B.french("Training failed:\n\n```\nValueError: eta loss steps\n```")
 check(err.startswith("L'entraînement a échoué :") and "eta loss steps" in err, "Suivi en français : le journal d'erreur reste tel quel")
 
+# vérification du jeu d'images : doublon (même image réduite), trop petite, filigrane, illisible
+from PIL import Image, ImageDraw
+aud = tmp / "audit"; aud.mkdir()
+base = Image.new("RGB", (1400, 1400), "white"); d = ImageDraw.Draw(base)
+for i in range(0, 1400, 100):
+    d.rectangle((i, 0, i + 50, 1400 - i), fill=(i % 255, 80, 200))
+base.save(aud / "a.png"); base.resize((1200, 1200)).save(aud / "a_copie.jpg", quality=80)
+Image.new("RGB", (1300, 1300), (20, 160, 90)).save(aud / "autre.png")
+Image.new("RGB", (400, 600), "gray").save(aud / "petite.png")
+(aud / "casse.png").write_bytes(b"not an image at all")
+L.store.images_of = lambda name: sorted(aud.iterdir())
+L.store.load = lambda name: {"captions": {"autre.png": "safe, 1girl, signature, smile"}, "resolution": 1024}
+r = B.cmd_audit({"name": "p"})
+kinds = {(x["kind"], x["files"][0]) for x in r["issues"]}
+check(("dup", "a_copie.jpg") in kinds and ("small", "petite.png") in kinds and ("mark", "autre.png") in kinds and ("broken", "casse.png") in kinds
+      and not any(k == "dup" and f in ("autre.png", "a.png", "petite.png") for k, f in kinds), "Vérifier les images : doublon (la copie réduite), trop petite, signature, illisible — " + str(sorted(kinds)))
+check(r["issues"][0]["kind"] == "broken", "Vérifier les images : l'image illisible d'abord (sd-scripts s'arrêterait dessus)")
+check(abs(B.vram_factor({"resolution": 768}, []) - 0.5625) < 1e-9 and B.vram_factor({"multires": True}, []) == (max(L.presets.FEWSHOT_RESOLUTIONS) / 1024) ** 2,
+      "VRAM : surface entraînée en multiples de 1024 px (768 px = 0,56)")
+
 import shutil
 shutil.rmtree(tmp, ignore_errors=True)
 print("Tout est bon" if not fails else f"{fails} échec(s)")

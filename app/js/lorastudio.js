@@ -99,6 +99,10 @@
         const tail = root && root.querySelector('.lt-log'); if (tail) tail.textContent = st.tail || '';
         if (was && !st.running) {
           stopPoll();
+          if (S.vramBase != null && KS.gpu && KS.gpu.peak > S.vramBase && (st.pct || 0) >= 3) {
+            call('note_run', { run: st.run, vram_peak_mb: KS.gpu.peak - S.vramBase }).catch(() => {});
+          }
+          S.vramBase = null;
           KS.toast(st.state === 'done' ? 'Entraînement LoRA terminé' : 'Entraînement LoRA arrêté (' + st.state + ')', st.state === 'done' ? 'ok' : 'info', 6000);
           const queue = KS.prefs.loraQueue || [];
           if (!st.stopped && st.state !== 'stopped' && queue.length) {
@@ -141,7 +145,7 @@
       const left = (KS.prefs.loraQueue || []).length;
       S.run = { run: r.run, project: name, running: true, state: 'running', pct: 0, checkpoints: [], samples: [],
         text: `File d'attente : **${label({ name, trigger: m.trigger })}** démarré, environ ${hh} h ${String(mm).padStart(2, '0')}.` + (left ? ` Encore ${left} projet(s) ensuite.` : ' Dernier de la file.') };
-      S.msgs.train = S.run.text; KS.gpu?.resetPeak();
+      S.msgs.train = S.run.text; KS.gpu?.resetPeak(); S.vramBase = KS.gpu?.last ? KS.gpu.last.used : null;
       KS.toast('Entraînement suivant : ' + label({ name, trigger: m.trigger }), 'info', 5000);
       startPoll(); if (root && root.isConnected) render();
       return true;
@@ -284,6 +288,29 @@
     await busy('captions', 'Enregistrement…', () => call('save', { name: S.cur, patch: { captions: S.caps } }));
     msg('captions', `Légendes enregistrées pour ${Object.keys(S.caps).length} image(s).`);
   }
+  // Vérifier les images : doublons, trop petites, très allongées, filigranes, illisibles (lora_bridge.py, cmd_audit)
+  async function audit() {
+    if (!S.cur) return;
+    S.audit = { pending: true }; render();
+    try { const r = await call('audit', { name: S.cur }); S.audit = { name: S.cur, ...r }; }
+    catch (e) { S.audit = { error: e.message }; }
+    render();
+  }
+  const KIND = { broken: 'Illisible', dup: 'Doublon', small: 'Trop petite', mark: 'Filigrane', ratio: 'Très allongée' };
+  function auditView() {
+    const a = S.audit; if (!a || (a.name && a.name !== S.cur)) return null;
+    if (a.pending) return h('div.fx-info', { text: '⏳ Vérification des images…' });
+    if (a.error) return h('div.fx-md', { html: F().md('⚠️ ' + a.error) });
+    if (!a.issues.length) return h('div.lt-audit.ok', { text: `✓ ${a.count} image(s) vérifiée(s) : pas de doublon, de petite image ni de filigrane repéré.` });
+    const byFile = new Map((S.data ? S.data.images : []).map(i => [i.file, i]));
+    return h('div.lt-audit', h('div.fx-lbl', { text: `${a.issues.length} remarque(s) sur ${a.count} image(s)` }),
+      ...a.issues.map(x => {
+        const im = byFile.get(x.files[0]);
+        const rm = x.kind !== 'mark' ? F().tbtn('Retirer', async () => { await removeImage(x.files[0]); S.audit.issues = S.audit.issues.filter(y => !y.files.includes(x.files[0])); render(); }, '.sm') : null;
+        return h('div.lt-issue', im ? zoomImg(im.preview || im.path, 120) : h('span'),
+          h('div', h('b', { text: KIND[x.kind] }), h('span.fx-info', { text: ' ' + x.files[0] }), h('div.fx-info', { text: x.text })), rm);
+      }));
+  }
   async function removeImage(file) {
     if (!(await KS.confirm('Retirer « ' + file + ' » du projet ? Le fichier est supprimé du dossier du projet.', { title: 'Lora Studio', ok: 'Retirer', danger: true }))) return;
     await call('remove', { name: S.cur, files: [file] });
@@ -313,6 +340,47 @@
     const go = v => (v / 1024).toFixed(1).replace('.', ',');
     return `\n\n⚠️ **${go(s.used)} Go de VRAM sont déjà occupés** par d’autres programmes (sur ${go(s.total)} Go) : l’entraînement risque de saturer la carte. Surveillez la barre de VRAM.`;
   }
+  // Mémoire qu'il faudra : une base (modèle, optimiseur) plus une part qui suit la surface des images entraînées.
+  // Valeurs de départ prudentes ; dès qu'un entraînement a été mesuré sur cette carte, on part de son pic réel.
+  const VRAM_BASE = 9 * 1024, VRAM_PER = 4 * 1024;      // Mio ; 1024 px ≈ 13 Go, taille réelle de 3000 × 4096 ≈ 18 Go
+  function areaOf(f) {
+    if (f.multires) return (Math.max(...(S.info.fewshot_resolutions || [1024])) / 1024) ** 2;
+    if (f.native_res) return (S.data && S.data.vram && S.data.vram.native_factor) || 1.4;
+    return (+f.resolution / 1024) ** 2;
+  }
+  function vramPlan(f = S.form) {
+    const g = KS.gpu && KS.gpu.last; if (!g || !f) return null;
+    const area = areaOf(f), m = S.data && S.data.vram && S.data.vram.measured;
+    const need = m ? m.peak_mb * (VRAM_BASE + VRAM_PER * area) / (VRAM_BASE + VRAM_PER * m.factor) : VRAM_BASE + VRAM_PER * area;
+    // ce que KaneApp garde est libéré avant l'entraînement si la case est cochée
+    const others = Math.max(0, g.used - (S.freeFirst !== false ? (KS.forgeOwn || 0) / 1048576 : 0));
+    const free = g.total - others;
+    return { need, free, total: g.total, area, measured: !!m, short: need > free * 0.97 };
+  }
+  function vramView() {
+    if (S.run && S.run.running) return null;
+    const v = vramPlan(); if (!v) return null;
+    const go = x => (x / 1024).toFixed(1).replace('.', ',');
+    const f = S.form, { tbtn } = F(), fixes = [];
+    if (v.short) {
+      if (f.native_res) fixes.push(tbtn('Décocher « Taille réelle »', () => { f.native_res = false; saveForm(); render(); }, '.sm'));
+      if (f.multires) fixes.push(tbtn('Une seule résolution', () => { f.multires = false; saveForm(); render(); }, '.sm'));
+      if (!f.native_res && !f.multires && +f.resolution > 768) fixes.push(tbtn('Passer en 768 px', () => { f.resolution = 768; saveForm(); render(); }, '.sm'));
+    }
+    const how = v.measured ? 'd’après le dernier entraînement mesuré sur cette carte' : 'estimation de départ, affinée après le premier entraînement mesuré';
+    return h('div.lt-vplan' + (v.short ? '.short' : ''),
+      h('span', { html: F().md(`VRAM nécessaire : **≈ ${go(v.need)} Go** · disponible : ${go(v.free)} Go sur ${go(v.total)} Go` + (v.short ? ' — **elle ne suffira pas** : l’entraînement débordera dans la mémoire vive et ralentira fortement.' : '')) }),
+      h('span.fx-info', { text: how + '.' }), ...fixes);
+  }
+  // L'estimation suit les réglages (taille réelle, résolutions) et la mémoire libre, relevée toutes les 2 s
+  function refreshPlan() {
+    if (!root || !root.isConnected) return;
+    const old = root.querySelector('.lt-vplan'), nu = vramView();
+    if (old && nu) old.replaceWith(nu);
+    else if (old) old.remove();
+    else if (nu) { const at = root.querySelector('.gpu-meter.detail'); if (at) at.after(nu); }
+  }
+  KS.gpu?.listeners.add(() => refreshPlan());
   async function start() {
     if (!S.cur) return msg('train', 'Choisissez d’abord un projet.');
     if ((KS.prefs.loraQueue || []).includes(S.cur)) { KS.prefs.loraQueue = KS.prefs.loraQueue.filter(n => n !== S.cur); KS.prefs.save(); }
@@ -323,8 +391,11 @@
       if (await forgeBusy()) return msg('train', 'KaneApp génère en ce moment : attendez la fin de la génération.');
       if (S.freeFirst !== false && KS.engine && KS.engine.ready()) note = '\n\n' + await freeVram();
       await flushCaps();
+      const plan = vramPlan(f);
+      if (plan && plan.short && !(await KS.confirm(`Cet entraînement demandera environ ${(plan.need / 1024).toFixed(1).replace('.', ',')} Go de VRAM ; ${(plan.free / 1024).toFixed(1).replace('.', ',')} Go sont disponibles. Il débordera dans la mémoire vive et sera plusieurs fois plus lent.`, { title: 'VRAM insuffisante', ok: 'Lancer quand même', cancel: 'Ajuster les réglages' }))) return;
       const patch = {}; for (const k of FORM_KEYS) patch[k] = f[k];
       await call('save', { name: S.cur, patch });
+      S.vramBase = KS.gpu && KS.gpu.last ? KS.gpu.last.used : null;
       const vramBefore = vramTaken();
       const r = await busy('train', 'Préparation du jeu de données et démarrage de sd-scripts…', () => call('start', { name: S.cur, dit: f.base_model, qwen3: S.qwen3 || S.info.qwen3, vae: S.vae || S.info.vae, sample_every: f.sample_every, sample_prompt: f.sample_prompt }));
       const hh = Math.floor(r.estimate_s / 3600), mm = Math.floor(r.estimate_s % 3600 / 60);
@@ -423,7 +494,7 @@
       if (S.freeFirst !== false && KS.engine && KS.engine.ready()) { try { await freeVram(); } catch { /* génération en cours : on continue */ } }
       const r = await call('start', { name: project, dit, qwen3: S.qwen3 || info.qwen3, vae: S.vae || info.vae, sample_every: m.sample_every ?? 250, sample_prompt: m.sample_prompt || '' });
       S.run = { run: r.run, project, running: true, state: 'running', pct: 0, text: 'Entraînement relancé (pid ' + r.pid + ').', checkpoints: [], samples: [] };
-      S.msgs.train = S.run.text; S.checked = 0; KS.gpu?.resetPeak();
+      S.msgs.train = S.run.text; S.checked = 0; KS.gpu?.resetPeak(); S.vramBase = KS.gpu?.last ? KS.gpu.last.used : null;
       startPoll();
       KS.toast('Entraînement de « ' + name + ' » relancé', 'ok', 3500);
       if (root && root.isConnected) { if (S.cur === project) await openProject(project); else render(); }
@@ -482,7 +553,9 @@
         tbtn('Importer les images', () => { if (!folder.value.trim()) return msg('project', 'Indiquez un dossier, ou déposez des images.'); importFrom({ folder: folder.value.trim() }).catch(() => {}); }, '.primary')),
       h('div.fx-info', { text: 'Pour de gros lots haute résolution : indiquez le dossier puis « Importer les images ». Copie locale ; qualité originale conservée.' }),
       drop,
-      msgBox('project'), on ? gallery : null);
+      msgBox('project'), on ? gallery : null,
+      on && S.data && S.data.images.length ? h('div.lt-row', tbtn('Vérifier les images', () => audit(), '', 'Doublons, images trop petites ou très allongées, filigranes et signatures repérés dans les légendes')) : null,
+      on ? auditView() : null);
     // carte Preset
     const kinds = Object.entries(I.presets);
     const hint = h('div.fx-info', { text: (I.presets[f.lora_type] || {}).hint || '' });
@@ -520,12 +593,12 @@
         slider('Étapes', f, 'steps', 100, 4000, 100, 'utilisé seulement si Époques vaut 0', saveForm), slider('Époques', f, 'epochs', 0, 40, 1, '0 = désactivé. Sinon : nombre d’étapes exact = images × répétitions', saveForm),
         slider('Répétitions par image', f, 'repeats', 1, 60, 1, 'images × cette valeur = 1 époque', saveForm)),
       h('div.fx-info', { text: 'Au-dessus de 0, Époques s’adapte au nombre d’images du projet (sd-scripts calcule le nombre d’étapes exact : images × répétitions) et remplace Étapes.' }),
-      h('div.lt-grid4', select('Résolution d’entraînement', I.resolutions.map(r => [String(r), String(r)]), { get v() { return String(f.resolution); }, set v(x) { f.resolution = +x; saveForm(); } }, 'v', 'ANIMA travaille en 1024 ; ne descendez à 768 que si la VRAM manque'),
+      h('div.lt-grid4', select('Résolution d’entraînement', I.resolutions.map(r => [String(r), String(r)]), { get v() { return String(f.resolution); }, set v(x) { f.resolution = +x; saveForm(); refreshPlan(); } }, 'v', 'ANIMA travaille en 1024 ; ne descendez à 768 que si la VRAM manque'),
         slider('Dimension / alpha du réseau', f, 'dim', 4, 128, 4, '', saveForm), field('Taux d’apprentissage', lr),
         select('Optimiseur', Object.entries(I.optimizers), f, 'optimizer', '', saveForm)),
       h('div.lt-grid3', select('Modules entraînés', Object.entries(I.scopes).map(([k, v]) => [k, v.label]), f, 'scope', 'les parties du modèle que le LoRA a le droit de modifier', v => { scopeHint.innerHTML = F().md(`**${I.scopes[v].summary}** · ${I.scopes[v].hint}`); saveForm(); }),
-        check('Taille réelle des images', f, 'native_res', 'chaque image s’entraîne à sa propre taille (jusqu’à 1536 × 1536), jamais agrandie : le trait est appris à l’échelle où vous générez (1856 × 1024…). Plus long : la durée suit la surface des images, jusqu’à 2 à 3 fois plus avec de très grandes images. À décocher pour aller vite.', saveForm),
-        check('Plusieurs résolutions', f, 'multires', `entraîne en ${I.fewshot_resolutions.join(' / ')} px au lieu d’une seule taille`, saveForm),
+        check('Taille réelle des images', f, 'native_res', 'chaque image s’entraîne à sa propre taille (jusqu’à 1536 × 1536), jamais agrandie : le trait est appris à l’échelle où vous générez (1856 × 1024…). Plus long : la durée suit la surface des images, jusqu’à 2 à 3 fois plus avec de très grandes images. À décocher pour aller vite.', () => { saveForm(); refreshPlan(); }),
+        check('Plusieurs résolutions', f, 'multires', `entraîne en ${I.fewshot_resolutions.join(' / ')} px au lieu d’une seule taille`, () => { saveForm(); refreshPlan(); }),
         check('Images en miroir', f, 'flip_aug', 'une seconde vue de chaque image, gratuitement. À éviter pour un sujet volontairement asymétrique', saveForm)),
       scopeHint, adv,
       select('Modèle de base pour l\'entraînement', I.dits.map(d => [d.path, d.name + (d.kind === 'base' ? ' (Base, conseillé)' : d.kind === 'tuned' ? ' (affiné)' : '')]), f, 'base_model', 'Pour Anima : la version Base (la LoRA marchera ensuite sur Aesthetic et Turbo)', v => { const d = I.dits.find(x => x.path === v); ditNote.textContent = d ? d.note : ''; saveForm(); }),
@@ -583,6 +656,7 @@
         tbtn('Annuler l\'extinction', async () => { S.power = false; await N.loraShutdown(false); msg('power', 'Extinction annulée : le PC restera allumé.'); render(); })),
       msgBox('power'),
       KS.gpu ? KS.gpu.meter({ detail: true }) : null,
+      vramView(),
       Object.assign(KS.bar.make(run ? run.pct : 0, run ? run.state : 'idle', 'train'), { className: 'lt-prog lt-train-prog' }),
       msgBox('train'),
       run && run.tail ? h('pre.lt-log', { text: run.tail }) : null,

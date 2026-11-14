@@ -74,3 +74,14 @@ body.theme-dark, body.theme-blue { --ok: #35c383; --danger: #ef6a52; --warn: #e0
 .lt-zoomable { cursor: zoom-in; }
 .lt-zoom { position: fixed; inset: 0; z-index: 600; display: grid; place-items: center; padding: 48px 24px 24px; background: rgba(0, 0, 0, .86); cursor: zoom-out; }
 .lt-zoom img { max-width: 100%; max-height: calc(100vh - 72px); border-radius: 8px; object-fit: contain; }
+
+/* Estimation de VRAM avant de lancer (lorastudio.js, vramView) */
+.lt-vplan { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 12.5px; }
+.lt-vplan > span:first-child { flex-basis: 100%; }
+.lt-vplan.short { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); }
+/* Vérification des images (auditView) */
+.lt-audit { display: flex; flex-direction: column; gap: 6px; max-height: 360px; overflow: auto; }
+.lt-audit.ok { color: var(--ok); font-size: 12.5px; max-height: none; }
+.lt-issue { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 6px; border: 1px solid var(--border); border-radius: 8px; }
+.lt-issue img { width: 48px; height: 48px; object-fit: cover; border-radius: 6px; }
+.lt-issue .fx-info { overflow: hidden; text-overflow: ellipsis; }

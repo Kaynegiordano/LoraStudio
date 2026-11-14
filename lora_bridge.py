@@ -265,7 +265,8 @@ def cmd_load(a):
         note = ("**Réglages calculés avec l'ancienne recette** (" + old + ") : elle donnait des LoRA environ trois fois trop forts, "
                 "qu'il fallait utiliser à 0,3. Cliquez **Appliquer le préréglage** pour les recalculer (plus court, prévu pour un poids de 1).") + ("\n\n" + note if note else "")
     return {"manifest": m, "images": images, "dir": str(s.dir_for(name)), "runs": runs, "note": note,
-            "suggest": suggest_look(m.get("captions") or {})}
+            "suggest": suggest_look(m.get("captions") or {}),
+            "vram": {"native_factor": round(native_factor(s.images_of(name)), 3) if images else 1.0, "measured": last_vram_peak()}}
 
 
 def suggest_look(caps: dict) -> dict | None:
@@ -559,7 +560,8 @@ def cmd_start(a):
     (work / "command.txt").write_text("\n".join(command), encoding="utf-8")
     record = {"id": run_id, "project": name, "started_at": datetime.now(timezone.utc).isoformat(), "settings": m,
               "command": command, "output": str(out_dir / f"{trigger}.safetensors"), "stopped": False, "pid": None,
-              "launched_by": "kanevas", "token": token, "kind": kind, "pixel_factor": round(factor, 3)}
+              "launched_by": "kanevas", "token": token, "kind": kind, "pixel_factor": round(factor, 3),
+              "vram_factor": round(vram_factor(m, images), 3)}
     s.atomic_json(work / "run.json", record)
     proc = t.launch(command, cwd=sd, log_path=log)
     record["pid"] = proc.pid
@@ -629,6 +631,107 @@ def cmd_install(a):
     if preview and preview.is_file():
         shutil.copyfile(preview, dest.with_suffix(".png"))
     return {"installed": str(dest), "name": dest.stem}
+
+
+# --------------------------------------------------------------------------- VRAM : estimation avant de lancer
+def vram_factor(m: dict, images) -> float:
+    """Surface entraînée par pas, en multiples de 1024 x 1024 : ce dont dépend la mémoire des activations."""
+    if m.get("multires"):
+        return (max(LIB.presets.FEWSHOT_RESOLUTIONS) / 1024) ** 2
+    if m.get("native_res"):
+        return native_factor(images)
+    return (int(m.get("resolution") or 1024) / 1024) ** 2
+
+
+def last_vram_peak() -> dict | None:
+    """Le dernier pic de VRAM mesuré pendant un entraînement (tous projets : c'est la même carte), avec sa surface."""
+    root = LIB.store.ROOT
+    files = sorted(root.glob("*/_training/runs/*/run.json"), key=lambda p: p.stat().st_mtime, reverse=True) if root.is_dir() else []
+    for rf in files[:60]:
+        try:
+            d = json.loads(rf.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        peak, f = d.get("vram_peak_mb"), d.get("vram_factor")
+        if isinstance(peak, (int, float)) and peak > 2000 and isinstance(f, (int, float)) and f > 0:
+            return {"peak_mb": round(peak), "factor": f, "project": d.get("project", ""), "at": d.get("finished_at") or d.get("started_at")}
+    return None
+
+
+def cmd_note_run(a):
+    """La page note le pic de VRAM qu'elle a vu pendant l'entraînement (déjà retiré de ce qu'occupaient les autres)."""
+    rf = Path(a["run"]) / "run.json"
+    if not str(rf.resolve()).lower().startswith(str(LIB.store.ROOT.resolve()).lower()):
+        raise ValueError("Entraînement inconnu")
+    data = json.loads(rf.read_text(encoding="utf-8"))
+    peak = float(a.get("vram_peak_mb") or 0)
+    if peak > 0:
+        data["vram_peak_mb"] = round(peak)
+        if not data.get("vram_factor"):
+            data["vram_factor"] = round(vram_factor(data.get("settings") or {}, LIB.store.images_of(data.get("project") or "")), 3)
+        LIB.store.atomic_json(rf, data)
+    return {"noted": peak > 0}
+
+
+# --------------------------------------------------------------------------- vérification du jeu d'images
+WATERMARK_TAGS = {"watermark", "signature", "artist name", "patreon username", "patreon logo", "web address", "twitter username",
+                  "dated", "logo", "copyright name", "fanbox username", "pixiv username", "artist logo"}
+
+
+def _dhash(im) -> int:
+    """Empreinte de 64 bits qui résiste au redimensionnement et à la recompression (deux images « pareilles » se ressemblent)."""
+    from PIL import Image
+    g = im.convert("L").resize((9, 8), Image.BILINEAR)
+    px = list(g.getdata())
+    bits = 0
+    for y in range(8):
+        for x in range(8):
+            bits = (bits << 1) | (px[y * 9 + x] > px[y * 9 + x + 1])
+    return bits
+
+
+def cmd_audit(a):
+    """Ce qui gâche un entraînement avant qu'il commence : doublons, images trop petites ou très allongées, filigranes,
+    fichiers illisibles. Rien n'est retiré ici : la page propose, l'utilisateur décide."""
+    from PIL import Image
+    s = LIB.store
+    name = a["name"]
+    m = s.load(name)
+    caps = m.get("captions") or {}
+    target = 1536 if m.get("native_res") else int(m.get("resolution") or 1024)
+    images = s.images_of(name)
+    issues, hashes = [], []
+    for p in images:
+        try:
+            with Image.open(p) as im:
+                im.load()
+                w, h = im.size
+                hashes.append((p, _dhash(im), w * h, list(im.convert("RGB").resize((16, 16), Image.BILINEAR).getdata())))
+        except Exception as exc:
+            issues.append({"kind": "broken", "files": [p.name], "text": f"illisible ({exc.__class__.__name__}) : sd-scripts s'arrêterait dessus"})
+            continue
+        if w * h < 0.55 * 1024 * 1024 or min(w, h) < 512:
+            issues.append({"kind": "small", "files": [p.name], "text": f"{w} × {h} : trop petite, elle sera agrandie et apprendra un trait flou"})
+        elif max(w, h) / min(w, h) > 3:
+            issues.append({"kind": "ratio", "files": [p.name], "text": f"{w} × {h} : très allongée, elle sera fortement réduite"})
+        tags = {t.strip().lower() for t in (caps.get(p.name) or "").split(",")}
+        marks = sorted(tags & WATERMARK_TAGS)
+        if marks:
+            issues.append({"kind": "mark", "files": [p.name], "text": "filigrane ou signature (" + ", ".join(marks) + ") : à rogner, sinon le LoRA risque de l'apprendre"})
+    # doublons : même structure (empreinte à 5 bits près sur 64) ET mêmes couleurs (écart moyen faible sur 16 x 16) ;
+    # l'empreinte seule confond deux images presque unies de couleurs différentes. On propose de retirer la plus petite.
+    def close_colors(ta, tb):
+        return sum(abs(x - y) for pa_, pb_ in zip(ta, tb) for x, y in zip(pa_, pb_)) / (len(ta) * 3) < 14
+    seen = set()
+    for i, (pa, ha, aa, ta) in enumerate(hashes):
+        for pb, hb, ab, tb in hashes[i + 1:]:
+            if bin(ha ^ hb).count("1") <= 5 and (pa, pb) not in seen and close_colors(ta, tb):
+                seen.add((pa, pb))
+                keep, drop = (pa, pb) if aa >= ab else (pb, pa)
+                issues.append({"kind": "dup", "files": [drop.name, keep.name], "text": f"presque identique à {keep.name} : un doublon compte double dans l'entraînement"})
+    order = {"broken": 0, "dup": 1, "small": 2, "mark": 3, "ratio": 4}
+    issues.sort(key=lambda x: order[x["kind"]])
+    return {"issues": issues, "count": len(images), "target": target}
 
 
 def cmd_status(a):
