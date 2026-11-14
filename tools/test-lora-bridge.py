@@ -107,6 +107,13 @@ check(B.previous_factor(prev / "train.log") == 2.2, "Cadence mesurée : la surfa
 (prev / "run.json").write_text(json.dumps({"settings": {"native_res": False}}), encoding="utf-8")
 check(B.previous_factor(prev / "train.log") == 1.0 and B.previous_factor(tmp / "rien" / "train.log") == 1.0, "Cadence mesurée en 1024 px, ou sans run.json : facteur 1")
 
+# suivi en français : la ligne d'avancement de lib_trainer, pas les journaux d'erreur
+fr = B.french("**120 / 1100 steps** (10%) &middot; elapsed 08:48 &middot; eta 1:11:52 &middot; 4.40s per step &middot; loss 0.0816\n\nDernière sauvegarde : `x.safetensors`")
+check(fr.startswith("**120 / 1100 pas** (10%) &middot; écoulé 08:48 &middot; reste 1:11:52 &middot; 4.40 s par pas &middot; perte 0.0816") and fr.endswith("`x.safetensors`"), "Suivi en français : " + fr.split("\n")[0])
+check(B.french("Loading models and caching latents...") == "Chargement des modèles et préparation des images…", "Suivi en français : chargement des modèles")
+err = B.french("Training failed:\n\n```\nValueError: eta loss steps\n```")
+check(err.startswith("L'entraînement a échoué :") and "eta loss steps" in err, "Suivi en français : le journal d'erreur reste tel quel")
+
 import shutil
 shutil.rmtree(tmp, ignore_errors=True)
 print("Tout est bon" if not fails else f"{fails} échec(s)")

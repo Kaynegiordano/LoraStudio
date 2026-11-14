@@ -5,15 +5,13 @@ contextBridge.exposeInMainWorld('ksNative', {
   platform: process.platform,
   setTitleBar: o => ipcRenderer.send('set-titlebar', o),
   setProgress: (value, mode) => ipcRenderer.send('set-progress', value, mode),
+  setCloseGuard: text => ipcRenderer.send('set-close-guard', text),
   pathForFile: f => { try { return webUtils.getPathForFile(f); } catch { return null; } },
   // atelier LoRA
   loraCall: (cmd, args) => ipcRenderer.invoke('lora-call', cmd, args),
   loraThumb: (file, width) => ipcRenderer.invoke('lora-thumb', file, width),
-  loraFile: file => ipcRenderer.invoke('lora-file', file),
-  loraWrite: (project, name, data) => ipcRenderer.invoke('lora-write', project, name, data),
   loraShutdown: (on, message) => ipcRenderer.invoke('lora-shutdown', on, message),
   pickImagePaths: () => ipcRenderer.invoke('pick-image-paths'),
-  pickFolderImages: () => ipcRenderer.invoke('pick-folder-images'),
   pickFolder: title => ipcRenderer.invoke('pick-folder', title),
   openFolder: p => ipcRenderer.invoke('open-folder', p),
   // Merge

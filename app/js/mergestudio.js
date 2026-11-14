@@ -154,11 +154,15 @@
   async function run() {
     if (S.running || !ready()) return;
     if (warning()) return KS.toast('Ces modèles n’ont pas la même architecture', 'err', 5000);
+    // la fusion calcule aussi sur la carte graphique : pendant un entraînement, les deux se gênent
+    const training = KS.trainTab ? await KS.trainTab.running().catch(() => '') : '';
+    if (training && !(await KS.confirm('Un entraînement est en cours (« ' + training + ' »). La fusion utilise aussi la carte graphique : les deux ralentiront et la VRAM peut saturer. Lancer la fusion quand même ?', { title: 'Merge', ok: 'Fusionner quand même' }))) return;
+    KS.closeGuard('merge', 'La fusion en cours sera annulée.');
     S.running = true; S.pct = 0; S.text = 'Démarrage…'; S.result = null; S.error = ''; draw();
     S.unsub && S.unsub();
     S.unsub = N.onMergeProgress(m => { S.pct = m.progress; S.text = m.text || ''; KS.bar.set(root && root.querySelector('.mg-bar'), S.pct, 'running'); const t = root && root.querySelector('.mg-prog'); if (t) t.textContent = S.text; });
     const r = await N.mergeRun(jobOf());
-    S.unsub && S.unsub(); S.unsub = null; S.running = false;
+    S.unsub && S.unsub(); S.unsub = null; S.running = false; KS.closeGuard('merge', '');
     if (r.ok) { S.result = r; S.list = null; KS.toast('Fusion terminée : ' + r.name, 'ok', 5000); await load(true); } else if (!r.cancelled) S.error = r.error; else S.error = 'Fusion annulée.';
     draw();
   }

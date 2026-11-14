@@ -39,6 +39,17 @@
     else thumb(file, w).then(u => { if (u) i.src = u; });
     return i;
   };
+  function view(file) {
+    const big = h('img', { alt: '' });
+    const box = h('div.lt-zoom', { title: 'Cliquer ou Échap pour fermer' }, big);
+    const close = () => { box.remove(); window.removeEventListener('keydown', onKey, true); };
+    const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+    box.addEventListener('click', close);
+    window.addEventListener('keydown', onKey, true);
+    thumb(file, 2048).then(u => { if (u) big.src = u; else close(); });
+    document.body.appendChild(box);
+  }
+  const zoomImg = (file, w) => { const i = img(file, w); i.classList.add('lt-zoomable'); i.title = 'Cliquer pour agrandir'; i.addEventListener('click', () => view(file)); return i; };
   const dropThumbs = () => { for (const u of S.thumbUrls.values()) if (u) URL.revokeObjectURL(u); S.thumbs.clear(); S.thumbUrls.clear(); };
 
   /* ---------------------------------------------------------------- données */
@@ -54,6 +65,7 @@
   }, 600);
   async function refreshProjects() { S.projects = (await call('list')).projects || []; }
   async function openProject(name) {
+    await flushCaps();
     S.cur = name; KS.prefs.loraProject = name; KS.prefs.save();
     if (!name) { S.data = null; S.form = null; S.caps = {}; return render(); }
     const data = await call('load', { name });
@@ -65,7 +77,7 @@
     if (S.form.scope && !S.info.scopes[S.form.scope]) S.form.scope = S.info.scope_default;
     S.caps = { ...(m.captions || {}) };
     const n = S.data.images.length;
-    S.msgs.project = `${n} image(s) in **${label({ name, trigger: m.trigger })}**. Aperçus réduits ; originaux conservés pour l’entraînement.` + (S.data.note ? '\n\n' + S.data.note : '');
+    S.msgs.project = `${n} image(s) dans **${label({ name, trigger: m.trigger })}**. Aperçus réduits ; originaux conservés pour l’entraînement.` + (S.data.note ? '\n\n' + S.data.note : '');
     const last = (S.data.runs || [])[0];
     if (last) { S.run = last; S.msgs.train = last.text; if (last.running) startPoll(); }
     render();
@@ -78,8 +90,9 @@
       if (!S.run || !S.run.run) return stopPoll();
       try {
         const st = (await call('status', { run: S.run.run })).status;
+        if (!st) throw new Error('état introuvable');
         const was = S.run.running;
-        S.run = st;
+        S.run = st; S.pollFails = 0;
         msg('train', st.text);
         KS.bar.set(root && root.querySelector('.lt-train-prog'), st.pct, st.state, 'train');
         if (!root || !root.isConnected) N.setProgress?.(st.running ? (st.pct || 0) / 100 : -1);      // autre onglet : la barre des tâches suit quand même
@@ -94,17 +107,30 @@
             if (await startQueued(next)) return;
           }
           if (S.power && !st.stopped && st.state !== 'stopped') {
-            const r = await N.loraShutdown(true, `KaneApp : entraînement LoRA ${st.state === 'done' ? 'terminé' : 'terminé avec une erreur'}. Le PC s'éteint dans 2 minutes. Pour annuler : bouton « Annuler l'extinction » de KaneApp, ou shutdown /a.`);
+            const r = await N.loraShutdown(true, `Lora Studio : entraînement LoRA ${st.state === 'done' ? 'terminé' : 'terminé avec une erreur'}. Le PC s'éteint dans 2 minutes. Pour annuler : bouton « Annuler l'extinction » de Lora Studio, ou shutdown /a.`);
             msg('power', r.ok ? '⏻ Extinction programmée dans 2 minutes.' : 'Extinction impossible : ' + r.error);
           }
-          S.power = false;
+          S.power = false; syncGuard();
           if (S.cur) { S.data = await call('load', { name: S.cur }).catch(() => S.data); }
           if (root && root.isConnected) render();
         }
-      } catch { /* passerelle occupée : on réessaie */ }
+      } catch {
+        // passerelle occupée : on réessaie ; au bout de 30 s sans réponse (dossier de l'entraînement disparu…), on le dit
+        if ((S.pollFails = (S.pollFails || 0) + 1) >= 6) {
+          stopPoll(); S.pollFails = 0;
+          msg('train', '⚠️ Le suivi de l’entraînement ne répond plus. Cliquez sur **Actualiser** pour relire son état.');
+        }
+      }
     }, 5000);
   }
   function stopPoll() { clearInterval(S.poll); S.poll = null; }
+  // Fermer la fenêtre n'arrête pas l'entraînement (sd-scripts tourne à part), mais la file et l'extinction s'arrêtent avec elle.
+  function syncGuard() {
+    const running = !!(S.run && S.run.running), queue = (KS.prefs.loraQueue || []).length, lost = [];
+    if (running && queue) lost.push(`la file d’attente (${queue} projet(s)) ne démarrera pas`);
+    if (running && S.power) lost.push('le PC ne s’éteindra pas à la fin');
+    KS.closeGuard('train', lost.length ? 'L’entraînement en cours continuera sans Lora Studio, mais ' + lost.join(' et ') + '.' : '');
+  }
   // Démarre un projet de la file avec ses réglages enregistrés (ceux du formulaire au moment où il a été mis en file)
   async function startQueued(name) {
     try {
@@ -142,6 +168,7 @@
   async function enqueue() {
     if (!S.cur) return msg('train', 'Choisissez d’abord un projet.');
     if (!String(S.form.trigger || '').trim()) return msg('train', 'Donnez un mot déclencheur avant de mettre ce projet en file.');
+    await flushCaps();
     const patch = {}; for (const k of FORM_KEYS) patch[k] = S.form[k];
     await call('save', { name: S.cur, patch });
     const q = (KS.prefs.loraQueue || []).filter(n => n !== S.cur);
@@ -158,23 +185,9 @@
     await refreshProjects(); await openProject(r.name);
     msg('project', `${r.added} image(s) importée(s) dans **${label(S.projects.find(p => p.name === r.name) || { name: r.name })}** (${r.count} au total). Originaux conservés ; aperçus réduits. Légendez-les (ou appliquez un préréglage), puis entraînez.`);
   }
-  async function addFromKanevas(which) {
-    if (!S.cur) return KS.toast('Choisissez ou créez d\'abord un projet', 'info');
-    const docs = which === 'all' ? KS.state.docs : KS.state.doc ? [KS.state.doc] : [];
-    if (!docs.length) return KS.toast('Aucun document ouvert', 'info');
-    let n = 0;
-    for (const d of docs) {
-      let c = d.composite();
-      if (which === 'sel' && d.selection.active) { const b = U.rectInt(d.selection.bounds); const t = U.canvas(b.w, b.h); t.getContext('2d').drawImage(c, -b.x, -b.y); c = t; }
-      const bytes = new Uint8Array(await (await U.blobFromCanvas(c)).arrayBuffer());
-      const r = await N.loraWrite(S.cur, d.name.replace(/\.[^.]+$/, '') + (which === 'sel' ? '_selection' : ''), bytes);
-      if (r.ok) n++;
-    }
-    await openProject(S.cur);
-    msg('project', `${n} image(s) ajoutée(s) depuis KaneApp.`);
-  }
   async function applyPreset() {
     if (!S.cur) return msg('preset', 'Choisissez d’abord un projet.');
+    await flushCaps();
     const r = await busy('preset', 'Légendes manquantes puis préréglage…', () => call('preset', { name: S.cur, kind: S.form.lora_type, threshold: S.form.threshold }));
     const m = r.manifest;
     for (const k of FORM_KEYS) if (m[k] != null) S.form[k] = m[k];
@@ -255,13 +268,24 @@
         h('div.fx-info', { text: 'Nombre d’images qui portent chaque tag. En surbrillance : présent sur toutes les images. Un clic : le retirer partout, le renommer, ou le compléter.' }),
         filter, list, h('div.lt-row', add, tbtn('Ajouter partout', addAll, '.sm'), undo)));
   }
+  // Enregistrement automatique 1,2 s après la dernière frappe. Avant, une légende corrigée à la main était perdue si l'on
+  // changeait de projet ou lançait l'entraînement sans cliquer « Enregistrer les légendes ».
+  let capsTimer = null, capsDirty = null;
+  function autosaveCaps() { capsDirty = { name: S.cur, caps: S.caps }; clearTimeout(capsTimer); capsTimer = setTimeout(() => flushCaps().catch(() => {}), 1200); }
+  async function flushCaps() {
+    clearTimeout(capsTimer);
+    const d = capsDirty; capsDirty = null;
+    if (!d || !d.name) return;
+    try { await call('save', { name: d.name, patch: { captions: d.caps } }); if (d.name === S.cur) msg('captions', 'Légendes enregistrées.'); }
+    catch (e) { if (d.name === S.cur) msg('captions', '⚠️ Légendes non enregistrées : ' + e.message); }
+  }
   async function saveCaptions() {
     if (!S.cur) return;
     await busy('captions', 'Enregistrement…', () => call('save', { name: S.cur, patch: { captions: S.caps } }));
     msg('captions', `Légendes enregistrées pour ${Object.keys(S.caps).length} image(s).`);
   }
   async function removeImage(file) {
-    if (!(await KS.confirm('Retirer « ' + file + ' » du projet ? Le fichier est supprimé du dossier du projet.', { title: 'Atelier LoRA', ok: 'Retirer', danger: true }))) return;
+    if (!(await KS.confirm('Retirer « ' + file + ' » du projet ? Le fichier est supprimé du dossier du projet.', { title: 'Lora Studio', ok: 'Retirer', danger: true }))) return;
     await call('remove', { name: S.cur, files: [file] });
     await openProject(S.cur);
   }
@@ -272,13 +296,13 @@
   };
   async function freeVram() {
     const E = KS.engine;
-    if (!E || !E.ready()) return 'Forge n\'est pas démarré : la carte graphique est libre.';
-    if (await forgeBusy()) throw new Error('Forge génère en ce moment : attendez la fin de la génération.');
+    if (!E || !E.ready()) return 'Le moteur de KaneApp n\'est pas démarré : rien à décharger.';
+    if (await forgeBusy()) throw new Error('KaneApp génère en ce moment : attendez la fin de la génération.');
     const before = await N.forgeMemory(KS.gen.url());
     await N.forgeUnload(KS.gen.url());
     const after = await N.forgeMemory(KS.gen.url());
-    const mb = v => Math.round(v / 1048576);
-    return before.ok && after.ok ? `Free VRAM **${mb(after.total - after.used)} MB** of ${mb(after.total)} MB (was ${mb(before.total - before.used)} MB). Forge reloads the checkpoint by itself on the next generation.` : 'Modèle de Forge déchargé.';
+    const go = v => (v / 1073741824).toFixed(1).replace('.', ',');
+    return before.ok && after.ok ? `Modèle de KaneApp déchargé : **${go(after.total - after.used)} Go** de VRAM libres sur ${go(after.total)} Go (${go(before.total - before.used)} Go avant). KaneApp le rechargera tout seul à sa prochaine génération.` : 'Modèle de KaneApp déchargé.';
   }
   // Avant de lancer : ce que d'autres programmes occupent déjà est retiré à l'entraînement (sd-scripts charge sa propre
   // copie du modèle). Au-delà de 3 Go pris, on le dit ; le pic de la barre repart de là.
@@ -296,8 +320,9 @@
     if (!String(f.trigger || '').trim()) return msg('train', 'Donnez un mot déclencheur : c’est le mot à écrire dans l’invite pour appeler le LoRA.');
     try {
       let note = '';
-      if (await forgeBusy()) return msg('train', 'Forge utilise actuellement le GPU. Attends la fin de la génération.');
+      if (await forgeBusy()) return msg('train', 'KaneApp génère en ce moment : attendez la fin de la génération.');
       if (S.freeFirst !== false && KS.engine && KS.engine.ready()) note = '\n\n' + await freeVram();
+      await flushCaps();
       const patch = {}; for (const k of FORM_KEYS) patch[k] = f[k];
       await call('save', { name: S.cur, patch });
       const vramBefore = vramTaken();
@@ -319,9 +344,10 @@
   }
   async function del() {
     if (!S.cur) return;
-    if (S.run && S.run.running && S.run.project === S.cur) return msg('project', 'Arrête l’entraînement avant de supprimer ce projet.');
-    if (!(await KS.confirm('Supprimer le projet « ' + label(S.projects.find(p => p.name === S.cur) || { name: S.cur }) + ' » et ses images ? Les LoRA déjà entraînés restent dans le dossier des LoRA.', { title: 'Atelier LoRA', ok: 'Supprimer', danger: true }))) return;
+    if (S.run && S.run.running && S.run.project === S.cur) return msg('project', 'Arrêtez l’entraînement avant de supprimer ce projet.');
+    if (!(await KS.confirm('Supprimer le projet « ' + label(S.projects.find(p => p.name === S.cur) || { name: S.cur }) + ' » et ses images ? Les LoRA déjà entraînés restent dans le dossier des LoRA.', { title: 'Lora Studio', ok: 'Supprimer', danger: true }))) return;
     await call('delete', { name: S.cur });
+    if ((KS.prefs.loraQueue || []).includes(S.cur)) { KS.prefs.loraQueue = KS.prefs.loraQueue.filter(n => n !== S.cur); KS.prefs.save(); }
     await refreshProjects(); S.cur = ''; await openProject('');
   }
 
@@ -389,7 +415,7 @@
       const name = label(S.projects.find(p => p.name === project) || { name: project });
       if (running && !(await KS.confirm('Arrêter l\'entraînement de « ' + name + ' » (' + Math.round(st.pct || 0) + ' % fait) et le relancer de zéro avec les mêmes réglages ?', { title: 'Relancer l\'entraînement', ok: 'Arrêter et relancer' }))) return;
       if (running) { await stopAny({ quiet: true }); }
-      if (await forgeBusy()) return KS.toast('Forge génère en ce moment : attendez la fin de la génération.', 'info', 4000);
+      if (await forgeBusy()) return KS.toast('KaneApp génère en ce moment : attendez la fin de la génération.', 'info', 4000);
       const info = await ensureInfo();
       const m = (await call('load', { name: project })).manifest || {};
       if (!String(m.trigger || '').trim()) return KS.toast('Ce projet n\'a pas de mot déclencheur : ouvrez-le dans l\'atelier Lora', 'info', 4500);
@@ -456,7 +482,6 @@
         tbtn('Importer les images', () => { if (!folder.value.trim()) return msg('project', 'Indiquez un dossier, ou déposez des images.'); importFrom({ folder: folder.value.trim() }).catch(() => {}); }, '.primary')),
       h('div.fx-info', { text: 'Pour de gros lots haute résolution : indiquez le dossier puis « Importer les images ». Copie locale ; qualité originale conservée.' }),
       drop,
-      null && h('div.fx-outbtns', h('span.fx-info', { text: 'Depuis KaneApp :' }), tbtn('Image du document', () => addFromKanevas('doc')), tbtn('Sélection', () => addFromKanevas('sel')), tbtn('Documents ouverts', () => addFromKanevas('all'))),
       msgBox('project'), on ? gallery : null);
     // carte Preset
     const kinds = Object.entries(I.presets);
@@ -469,7 +494,7 @@
     const rows = h('div.lt-caps');
     for (const im of (S.data ? S.data.images : [])) {
       const ta = h('textarea.fx-ta.fx-small', { rows: 2, spellcheck: false }); ta.value = S.caps[im.file] || '';
-      ta.addEventListener('input', () => { S.caps[im.file] = ta.value; });
+      ta.addEventListener('input', () => { S.caps[im.file] = ta.value; autosaveCaps(); });
       rows.appendChild(h('div.lt-caprow', img(im.preview || im.path, 200), h('div.fx-col', h('span.fx-info', { text: im.file }), ta)));
     }
     const captions = h('div.fx-panel.lt-card', h('div.fx-h', { text: 'Légendes' }),
@@ -516,20 +541,20 @@
       results.append(h('div.fx-lbl', { text: running ? 'Versions déjà sauvegardées (les suivantes arrivent)' : 'Choisissez la version à garder' }),
         h('div.fx-info', { text: 'Mêmes invites et même graine à chaque sauvegarde : comparez, puis gardez celle où le style est là sans abîmer le reste. Dans vos invites : ' + (token || 'le déclencheur') + '.' }));
       const grid = h('div.lt-epochs');
-      if ((run.before || []).length) grid.append(h('div.lt-ep.before', h('div.lt-ep-h', h('b', { text: 'Sans le LoRA' }), h('span.fx-info', { text: 'référence' })), h('div.lt-ep-imgs', ...run.before.map(s => img(s, 260)))));
+      if ((run.before || []).length) grid.append(h('div.lt-ep.before', h('div.lt-ep-h', h('b', { text: 'Sans le LoRA' }), h('span.fx-info', { text: 'référence' })), h('div.lt-ep-imgs', ...run.before.map(s => zoomImg(s, 260)))));
       for (const c of eps.slice().reverse()) {
         const tryIt = tbtn('Essayer', () => KS.studioApi && KS.studioApi.addToPrompt(`<lora:${c.name}:1>` + (token ? ' ' + token : '')), '.sm', 'Ajoute cette version et son déclencheur à l\'invite du Studio de KaneApp');
         const keep = tbtn('Garder cette version', async () => {
           try {
             const r = await call('install', { path: c.path, name: (f.trigger || c.name).replace(/^@/, ''), token, weight: 1, preview: c.samples[c.samples.length - 1] || '',
-              notes: `KaneApp, ${c.final ? 'dernière époque' : 'époque ' + c.epoch}, préréglage ${f.lora_type || 'style'}` });
+              notes: `Lora Studio, ${c.final ? 'dernière époque' : 'époque ' + c.epoch}, préréglage ${f.lora_type || 'style'}` });
             KS.toast(`LoRA installé : ${r.name} — poids conseillé 1`, 'ok', 5000);
             KS.studioApi?.reloadCat?.();
           } catch (e) { KS.toast('Installation impossible : ' + e.message, 'err', 6000); }
         }, '.primary.sm', 'Copie cette version dans vos LoRA (dossier Anima), avec sa fiche et son image');
         grid.append(h('div.lt-ep' + (c.final ? '.final' : ''),
           h('div.lt-ep-h', h('b', { text: c.final ? `Époque ${c.epoch} · finale` : `Époque ${c.epoch}` }), h('span.fx-info', { text: c.name })),
-          c.samples.length ? h('div.lt-ep-imgs', ...c.samples.map(s => img(s, 260))) : h('div.fx-info', { text: 'Pas d’image d’aperçu pour cette version.' }),
+          c.samples.length ? h('div.lt-ep-imgs', ...c.samples.map(s => zoomImg(s, 260))) : h('div.fx-info', { text: 'Pas d’image d’aperçu pour cette version.' }),
           h('div.lt-row', tryIt, keep)));
       }
       results.append(grid);
@@ -542,7 +567,7 @@
       }
       results.append(tbtn('Ouvrir le dossier', () => N.openFolder(run.output.replace(/[\\/][^\\/]+$/, '')), '.sm'));
     }
-    const samples = !eps.length && run && (run.samples || []).length ? h('div.lt-samples', ...run.samples.slice(-8).map(s => img(s, 220))) : null;
+    const samples = !eps.length && run && (run.samples || []).length ? h('div.lt-samples', ...run.samples.slice(-8).map(s => zoomImg(s, 220))) : null;
     const train = h('div.fx-panel.lt-card',
       row2(check('Images d’aperçu à chaque sauvegarde', { get v() { return +f.sample_every > 0; }, set v(x) { f.sample_every = x ? 250 : 0; } }, 'v',
           'Deux images (une scène du jeu d’images, une nouvelle) avant l’entraînement puis à chaque version sauvegardée, même graine : pour choisir la meilleure époque', saveForm),
@@ -551,10 +576,10 @@
         tbtn('Libérer la VRAM maintenant', async () => { try { msg('vram', await freeVram()); } catch (e) { msg('vram', '⚠️ ' + e.message); } })),
       msgBox('vram'),
       h('div.lt-row.lt-go', tbtn(running ? 'Entraînement en cours…' : 'Lancer l’entraînement', () => start(), '.primary.lt-start'),
-        tbtn('Ajouter à la file', () => enqueue().catch(e => msg('train', '⚠️ ' + e.message)), '.lt-enqueue', 'Enchaîner plusieurs projets : chacun démarre à la fin du précédent, avec ses réglages enregistrés. KaneApp doit rester ouvert.'),
+        tbtn('Ajouter à la file', () => enqueue().catch(e => msg('train', '⚠️ ' + e.message)), '.lt-enqueue', 'Enchaîner plusieurs projets : chacun démarre à la fin du précédent, avec ses réglages enregistrés. Lora Studio doit rester ouvert.'),
         tbtn('Arrêter', () => stop()), tbtn('Actualiser', () => refreshAll())),
       queueView(),
-      h('div.lt-row', check('Éteindre le PC quand l\'entraînement est terminé', power, 'v', '2 min après la fin, réussi ou en échec ; pas si vous l\'arrêtez vous-même. KaneApp doit rester ouvert.', v => { S.power = v; msg('power', v ? '⏻ Le PC s\'éteindra 2 minutes après la fin de l\'entraînement (réussi ou en échec). Pas d\'extinction si vous l\'arrêtez vous-même.' : 'Le PC restera allumé à la fin de l\'entraînement.'); }),
+      h('div.lt-row', check('Éteindre le PC quand l\'entraînement est terminé', power, 'v', '2 min après la fin, réussi ou en échec ; pas si vous l\'arrêtez vous-même. Lora Studio doit rester ouvert.', v => { S.power = v; syncGuard(); msg('power', v ? '⏻ Le PC s\'éteindra 2 minutes après la fin de l\'entraînement (réussi ou en échec). Pas d\'extinction si vous l\'arrêtez vous-même.' : 'Le PC restera allumé à la fin de l\'entraînement.'); }),
         tbtn('Annuler l\'extinction', async () => { S.power = false; await N.loraShutdown(false); msg('power', 'Extinction annulée : le PC restera allumé.'); render(); })),
       msgBox('power'),
       KS.gpu ? KS.gpu.meter({ detail: true }) : null,
@@ -572,6 +597,7 @@
     colR.append(...[intro, on ? settings : null, on ? train : null].filter(Boolean));
     root.replaceChildren(colL, colR);
     if (sc) sc.scrollTop = top;
+    syncGuard();
   }
 
   KS.trainTab = {

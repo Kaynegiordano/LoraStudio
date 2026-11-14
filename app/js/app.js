@@ -72,5 +72,6 @@
   });
 
   applyTheme();
+  N?.appVersion?.().then(v => { if (v && v.version) document.querySelector('.ls-brand').title = 'Lora Studio ' + v.version; }).catch(() => {});
   refreshGpu().finally(() => show(KS.prefs.lsTab || 'train'));
 })();

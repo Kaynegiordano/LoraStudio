@@ -79,6 +79,7 @@ def run_state(run_file: Path) -> dict:
     info = t.read_progress(log, running, return_code=code, stopped=bool(data.get("stopped")), expected_output=output)
     if info["state"] == "error" and code == 0 and not (output and output.is_file()):
         info = {"state": "done", "pct": 100, "text": "Entraînement terminé (le fichier final a été déplacé ou renommé depuis)."}
+    info["text"] = french(info["text"])
     out_dir = output.parent if output else None
     ckpts, samples, epochs = [], [], []
     if out_dir and out_dir.is_dir():
@@ -99,6 +100,23 @@ def run_state(run_file: Path) -> dict:
             "output": str(output) if output else "", "checkpoints": ckpts, "samples": samples, "tail": tail,
             "started_at": data.get("started_at"), "epochs": epochs, "token": data.get("token") or "",
             "before": [str(p) for p in pngs if re.search(r"_000000_\d{2}_", p.name)] if out_dir and out_dir.is_dir() else []}
+
+
+# lib_trainer écrit sa ligne d'avancement en anglais (c'est aussi l'onglet de Forge) : on la traduit ici, sans y toucher
+FRENCH = (("Loading models and caching latents...", "Chargement des modèles et préparation des images…"),
+          ("No training has been started yet.", "Aucun entraînement lancé pour l'instant."),
+          ("Training failed:", "L'entraînement a échoué :"), ("Could not read the log:", "Journal illisible :"))
+FRENCH_LINE = ((" steps**", " pas**"), ("elapsed ", "écoulé "), ("eta ", "reste "), ("s per step", " s par pas"), ("loss ", "perte "))
+
+
+def french(text: str) -> str:
+    for a, b in FRENCH:
+        text = text.replace(a, b)
+    first, sep, rest = text.partition("\n")
+    if "**" in first and "&middot;" in first:               # la ligne « 120 / 1100 steps (10%) · elapsed … » seulement
+        for a, b in FRENCH_LINE:
+            first = first.replace(a, b)
+    return first + sep + rest
 
 
 def epoch_cards(out_dir: Path, output: Path | None, pngs: list, data: dict) -> list[dict]:

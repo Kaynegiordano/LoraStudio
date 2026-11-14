@@ -24,6 +24,15 @@
   };
   KS.resetDrop = () => {};
 
+  // Ce que fermer la fenêtre ferait perdre : chaque atelier donne sa phrase (ou '' quand il n'y a plus rien à perdre),
+  // le processus principal demande confirmation tant qu'il en reste une.
+  const guards = {};
+  KS.closeGuard = (key, text) => {
+    if ((guards[key] || '') === (text || '')) return;
+    guards[key] = text || '';
+    N.setCloseGuard?.(Object.values(guards).filter(Boolean).join('\n\n'));
+  };
+
   // Barre de progression en couleur, commune à l'entraînement et au Merge : dégradé pendant le travail (rayures animées),
   // verte une fois terminé, rouge en erreur, orange si arrêté ; le pourcentage à droite. `task` (facultatif) nomme le
   // travail pour la barre des tâches de Windows, qui montre la même avancée quand la fenêtre est réduite.

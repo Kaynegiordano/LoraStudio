@@ -11,6 +11,7 @@ fs.writeFileSync(preload, `
 window.loraImages = []; window.loraPaths = [];
 window.ksNative = {
   setTitleBar(o) { window.titleBar = o; },
+  setCloseGuard(text) { window.closeGuard = text; },
   setProgress(value, mode) { (window.taskbar ||= []).push([value, mode]); },
   pathForFile: file => 'C:/selected/' + file.name,
   pickImagePaths: async () => window.loraPaths,
@@ -143,6 +144,31 @@ async function scenario() {
   assert(prog().querySelector('.lt-pct').textContent === 'Erreur · 37 %' && window.taskbar.at(-1)[1] === 'error', 'Progression : erreur = rouge, signalée dans la barre des tâches');
   await show('stopped', 60, false);
   assert(prog().querySelector('.lt-pct').textContent === 'Arrêté · 60 %', 'Progression : arrêté = orange, avec le pourcentage atteint');
+  // Légendes : une correction à la main s'enregistre toute seule
+  window.loraRun = null; KS.trainTab.invalidate(); await wait(() => !!document.querySelector('.lt-caprow textarea'));
+  const before = (window.loraSaves || []).length, ta = document.querySelector('.lt-caprow textarea');
+  ta.value = 'safe, 1girl, corrige a la main'; ta.dispatchEvent(new Event('input'));
+  await wait(() => (window.loraSaves || []).slice(before).some(x => x.patch && x.patch.captions && Object.values(x.patch.captions).includes('safe, 1girl, corrige a la main')));
+  assert(true, 'Légendes : une correction à la main est enregistrée automatiquement, sans cliquer « Enregistrer »');
+  // Images d'aperçu : un clic les agrandit, Échap referme
+  window.loraRun = { run: 'C:/runs/r1', project: 'Import-test', running: false, state: 'done', pct: 100, text: 'Terminé', output: 'C:/out/n1x3u.safetensors', token: '@n1x3u',
+    checkpoints: [], samples: [], before: [], epochs: [{ epoch: 4, path: 'C:/out/n1x3u.safetensors', name: 'n1x3u', final: true, samples: ['C:/out/sample/n1x3u_e000004_00_1.png'] }] };
+  KS.trainTab.invalidate(); await wait(() => !!document.querySelector('.lt-ep-imgs img.lt-zoomable'));
+  document.querySelector('.lt-ep-imgs img.lt-zoomable').click();
+  assert(!!document.querySelector('.lt-zoom') && window.thumbCalls.some(c => c.width === 2048 && c.file.includes('e000004_00')), 'Aperçu : un clic sur une image d’époque l’ouvre en grand');
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+  await wait(() => !document.querySelector('.lt-zoom'));
+  assert(!document.querySelector('.lt-zoom'), 'Aperçu : fermé (Échap, ou image illisible)');
+  // Fermeture : on prévient quand la file d'attente ou l'extinction dépendent de la fenêtre
+  KS.prefs.loraQueue = [];
+  await show('running', 42, true);
+  assert(!window.closeGuard, 'Fermeture : un entraînement seul ne demande rien (il continue sans la fenêtre)');
+  const powerBox = [...document.querySelectorAll('.fx-check')].find(l => l.textContent.includes('Éteindre le PC')).querySelector('input');
+  powerBox.click();
+  assert(/ne s’éteindra pas/.test(window.closeGuard || ''), 'Fermeture : avec « Éteindre le PC », on prévient que l’extinction ne se fera pas : ' + window.closeGuard);
+  assert(powerBox.closest('label').title.includes('Lora Studio doit rester ouvert') && !document.querySelector('.lt-card').textContent.includes('Forge reloads'), 'Textes : Lora Studio (et non KaneApp) doit rester ouvert');
+  powerBox.click();
+  assert(!window.closeGuard, 'Fermeture : plus rien à perdre, plus de question');
   // Thèmes : Sombre, Système, Bleu, Clair ; le choix est retenu et la barre de titre suit
   const btn = document.querySelector('.ls-theme');
   btn.click(); await new Promise(r => setTimeout(r, 50));

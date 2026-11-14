@@ -1,3 +1,14 @@
+# 1.3.0 — relecture complète : corrections et confort
+
+- **Légendes enregistrées toutes seules** après une correction à la main : plus de légende perdue en changeant de projet ou en lançant l'entraînement sans cliquer « Enregistrer ».
+- **Images d'aperçu agrandies d'un clic** (Échap ou clic pour refermer).
+- **Fermeture** : si la file d'attente ou l'extinction du PC dépendent de la fenêtre, Lora Studio demande avant de fermer. L'entraînement lui-même continue sans la fenêtre.
+- **Merge pendant un entraînement** : avertissement avant de lancer, les deux se partagent la carte graphique. Une fusion en cours s'arrête quand on quitte l'application.
+- **Fenêtre** : taille et position retenues ; la version s'affiche au survol du nom.
+- **« Modèle chargé » corrigé** : l'en-tête comptait toute la mémoire de la carte, si bien qu'un entraînement en cours faisait croire que KaneApp gardait un modèle chargé.
+- **Suivi de l'entraînement en français** (pas, temps écoulé, reste, perte) ; il renonce après 30 s sans réponse et le dit, au lieu d'interroger sans fin.
+- Un projet supprimé quitte la file d'attente ; textes qui parlaient encore de KaneApp ou d'anglais corrigés ; code hérité de KaneApp retiré.
+
 # 1.2.1 — nouvelle icône
 
 - **Nouvelle icône** : un « L » en facettes plates sur fond bleu nuit, de la même famille que le K de KaneApp. Le fût rouge corail est celui du K ; le pied est coupé en deux facettes, jaune et cyan, comme ses deux bras. Chaque taille (16 à 256 px) est dessinée à sa taille pour rester nette dans la barre des tâches.

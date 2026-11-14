@@ -62,7 +62,7 @@
     }
   }, true);
 
-  KS.confirm = (message, { title = 'KaneApp', ok = 'OK', cancel = 'Annuler', third = null, danger = false } = {}) => new Promise(res => {
+  KS.confirm = (message, { title = 'Lora Studio', ok = 'OK', cancel = 'Annuler', third = null, danger = false } = {}) => new Promise(res => {
     const buttons = [];
     if (third) buttons.push({ label: third, value: 'third' });
     buttons.push({ label: cancel, value: false });

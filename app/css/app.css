@@ -69,3 +69,8 @@ body.theme-dark, body.theme-blue { --ok: #35c383; --danger: #ef6a52; --warn: #e0
 .lt-prog[data-state="stopped"] .lt-pct { color: #d08a00; }
 @keyframes lt-stripes { from { background-position: 0 0, 0 0; } to { background-position: 28px 0, 0 0; } }
 @media (prefers-reduced-motion: reduce) { .lt-prog .lt-bar > i { animation: none !important; } }
+
+/* Image d'aperçu agrandie (clic sur une image d'époque) */
+.lt-zoomable { cursor: zoom-in; }
+.lt-zoom { position: fixed; inset: 0; z-index: 600; display: grid; place-items: center; padding: 48px 24px 24px; background: rgba(0, 0, 0, .86); cursor: zoom-out; }
+.lt-zoom img { max-width: 100%; max-height: calc(100vh - 72px); border-radius: 8px; object-fit: contain; }

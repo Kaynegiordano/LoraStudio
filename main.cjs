@@ -31,7 +31,11 @@ function dirs() {
 }
 const studioEnv = () => { try { return managed().environment('studio'); } catch { return process.env; } };
 const outputPaths = require('./output-paths.cjs')(() => dirs().root);
-const insideDir = (root, p) => !!root && path.resolve(p).startsWith(path.resolve(root) + path.sep);
+const insideDir = (root, p) => {
+  if (!root || !p) return false;
+  const a = path.resolve(root) + path.sep, b = path.resolve(String(p));
+  return process.platform === 'win32' ? b.toLowerCase().startsWith(a.toLowerCase()) : b.startsWith(a);   // Windows ne distingue pas la casse
+};
 const unpacked = f => path.join(__dirname.replace('app.asar', 'app.asar.unpacked'), f);
 
 /* ------------------------------------------------------------------ fenêtre */
@@ -48,18 +52,44 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 const chromeFile = () => path.join(app.getPath('userData'), 'window-chrome.json');
+const boundsFile = () => path.join(app.getPath('userData'), 'window-bounds.json');
+// Taille et place de la fenêtre au dernier usage ; la place n'est reprise que si elle tombe encore sur un écran branché.
+function savedBounds() {
+  const out = { width: 1440, height: 920 };
+  try {
+    const b = JSON.parse(fs.readFileSync(boundsFile(), 'utf8'));
+    if (b.width >= 900 && b.height >= 600) { out.width = Math.round(b.width); out.height = Math.round(b.height); }
+    const { screen } = require('electron');
+    const visible = Number.isFinite(b.x) && Number.isFinite(b.y) && screen.getAllDisplays().some(d => b.x + 100 < d.workArea.x + d.workArea.width && b.x + out.width - 100 > d.workArea.x && b.y >= d.workArea.y - 10 && b.y + 40 < d.workArea.y + d.workArea.height);
+    if (visible) { out.x = Math.round(b.x); out.y = Math.round(b.y); }
+    out.maximized = !!b.maximized;
+  } catch { /* premier lancement */ }
+  return out;
+}
+// Ce que la fermeture ferait perdre (file d'attente, extinction du PC, fusion en cours) : la page le dit, on demande avant.
+let closeGuard = '';
+ipcMain.on('set-close-guard', (_e, text) => { closeGuard = String(text || '').slice(0, 800); });
 function createWindow() {
   let chrome = { color: '#ffffff', symbolColor: '#3b4552' };
   try { chrome = { ...chrome, ...JSON.parse(fs.readFileSync(chromeFile(), 'utf8')) }; } catch { /* premier lancement */ }
+  const bounds = savedBounds();
   const icon = app.isPackaged ? path.join(process.resourcesPath, 'lorastudio.ico') : path.join(__dirname, 'build', 'icon.ico');
   win = new BrowserWindow({
-    width: 1440, height: 920, minWidth: 900, minHeight: 600, backgroundColor: chrome.color, title: 'Lora Studio', icon,
+    width: bounds.width, height: bounds.height, ...(bounds.x != null ? { x: bounds.x, y: bounds.y } : {}), minWidth: 900, minHeight: 600, backgroundColor: chrome.color, title: 'Lora Studio', icon,
     titleBarStyle: 'hidden', titleBarOverlay: { color: chrome.color, symbolColor: chrome.symbolColor, height: 40 }, show: false,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, spellcheck: false, backgroundThrottling: false },
   });
   if (process.platform === 'win32') win.setAppDetails({ appId: 'com.kane.lorastudio', appIconPath: icon, appIconIndex: 0, relaunchDisplayName: 'Lora Studio' });
   win.setMenu(null);
-  win.once('ready-to-show', () => win.show());
+  win.once('ready-to-show', () => { if (bounds.maximized) win.maximize(); win.show(); });
+  win.webContents.on('will-navigate', e => e.preventDefault());      // la page ne quitte jamais index.html
+  win.on('close', e => {
+    if (closeGuard) {
+      const choice = dialog.showMessageBoxSync(win, { type: 'warning', title: 'Lora Studio', message: 'Fermer Lora Studio ?', detail: closeGuard, buttons: ['Rester', 'Fermer quand même'], defaultId: 0, cancelId: 0, noLink: true });
+      if (choice === 0) return e.preventDefault();
+    }
+    try { fs.writeFileSync(boundsFile(), JSON.stringify({ ...win.getNormalBounds(), maximized: win.isMaximized() })); } catch { /* profil en lecture seule */ }
+  });
   win.webContents.setWindowOpenHandler(({ url }) => { if (/^https:\/\//.test(url)) shell.openExternal(url); return { action: 'deny' }; });
   win.loadFile(path.join(__dirname, 'app', 'index.html'));
   win.on('closed', () => { win = null; });
@@ -110,33 +140,9 @@ ipcMain.handle('lora-thumb', async (_e, file, width = 256) => {
     return { ok: true, data: new Uint8Array((sz.width > width ? ni.resize({ width, quality: 'good' }) : ni).toJPEG(85)), w: sz.width, h: sz.height };
   } catch (err) { return { ok: false, error: String(err.message || err) }; }
 });
-ipcMain.handle('lora-file', (_e, file) => {
-  try {
-    if (!inProjects(file)) throw new Error('Chemin refusé');
-    return { ok: true, name: path.basename(file), data: fs.readFileSync(file) };
-  } catch (err) { return { ok: false, error: String(err.message || err) }; }
-});
-ipcMain.handle('lora-write', (_e, project, name, data) => {
-  try {
-    const d = dirs();
-    const safeProj = String(project).replace(/[^A-Za-z0-9 _-]/g, '').slice(0, 64).trim();
-    const dir = path.join(d.data, 'lora_training', safeProj);
-    if (!safeProj || !fs.existsSync(path.join(dir, 'project.json'))) throw new Error('Projet introuvable');
-    const base = path.basename(String(name)).normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w .-]/g, '_').replace(/\.[^.]*$/, '') || 'image';
-    let f = path.join(dir, base + '.png'), i = 2;
-    while (fs.existsSync(f)) f = path.join(dir, `${base}_${i++}.png`);
-    fs.writeFileSync(f, Buffer.from(data));
-    return { ok: true, file: path.basename(f) };
-  } catch (err) { return { ok: false, error: String(err.message || err) }; }
-});
 ipcMain.handle('pick-image-paths', async () => {
   const r = await dialog.showOpenDialog(win, { title: 'Images pour l\'entraînement', properties: ['openFile', 'multiSelections'], filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] }] });
   return r.canceled ? [] : r.filePaths;
-});
-ipcMain.handle('pick-folder-images', async () => {
-  const r = await dialog.showOpenDialog(win, { title: 'Dossier d\'images', properties: ['openDirectory'] });
-  if (r.canceled || !r.filePaths[0]) return [];
-  return fs.readdirSync(r.filePaths[0]).filter(n => /\.(png|jpe?g|webp|bmp)$/i.test(n)).map(n => path.join(r.filePaths[0], n));
 });
 ipcMain.handle('pick-folder', async (_e, title) => {
   const r = await dialog.showOpenDialog(win, { title: title || 'Dossier', properties: ['openDirectory'] });
@@ -250,12 +256,13 @@ ipcMain.handle('merge-run', async (event, job) => {
     return { ok: false, error: String(err.message || err) };
   }
 });
-ipcMain.handle('merge-cancel', () => {
-  if (!mergeChild) return { ok: true };
+const stopMerge = () => {
+  if (!mergeChild) return;
   mergeChild.killedByUs = true; try { mergeChild.kill(); } catch { /* déjà fini */ }
   if (mergeOut) try { fs.rmSync(mergeOut + '.tmp', { force: true }); } catch { /* rien */ }
-  return { ok: true };
-});
+};
+app.on('will-quit', stopMerge);        // sinon le processus Python continuait seul et écrivait un fichier que personne n'attend
+ipcMain.handle('merge-cancel', () => { stopMerge(); return { ok: true }; });
 
 /* ------------------------------------------------------------------ le moteur de KaneApp (Forge), seulement interrogé */
 // Le moteur du Studio de KaneApp (7862), sinon le Forge de Kane OS (7860). Lora Studio ne le démarre jamais : il le
@@ -288,12 +295,19 @@ const forgeHandler = fn => async (_e, ...a) => {
     return { ok: true, ...(await fn(...a)) };
   } catch (err) { return { ok: false, error: String(err.message || err) }; }
 };
+// used / total : toute la carte ; own : ce que le moteur de KaneApp a réservé (octets)
+function forgeMemory(r) {
+  const cuda = (r && r.cuda) || {}, sys = cuda.system || {};
+  return { used: sys.used || 0, total: sys.total || 0, own: (cuda.reserved && cuda.reserved.current) || 0 };
+}
 ipcMain.handle('forge-alive', async () => {
   const base = await findForge();
   if (!base) return { ok: true, up: false };
-  let used = 0, total = 0;
-  try { const r = await forgeCall('/sdapi/v1/memory', null, 3000); const c = (r && r.cuda && r.cuda.system) || {}; used = c.used || 0; total = c.total || 0; } catch { /* rien */ }
-  return { ok: true, up: true, port: +base.split(':').pop(), used, total, loaded: used > 3 * 1024 ** 3 };
+  // « Modèle chargé » : ce que le moteur a réservé lui-même. Avant, on regardait la mémoire utilisée de toute la carte :
+  // un entraînement en cours (ou un jeu) faisait croire que KaneApp gardait un modèle chargé.
+  let used = 0, total = 0, own = 0;
+  try { const m = forgeMemory(await forgeCall('/sdapi/v1/memory', null, 3000)); used = m.used; total = m.total; own = m.own; } catch { /* rien */ }
+  return { ok: true, up: true, port: +base.split(':').pop(), used, total, own, loaded: own > 1.5 * 1024 ** 3 };
 });
 ipcMain.handle('forge-progress', forgeHandler(async () => {
   const r = await forgeCall('/sdapi/v1/progress?skip_current_image=true', null, 4000);
@@ -301,11 +315,7 @@ ipcMain.handle('forge-progress', forgeHandler(async () => {
   return { progress: r ? r.progress : 0, eta: r ? r.eta_relative : 0, step: st.sampling_step, steps: st.sampling_steps, jobs: st.job_count };
 }));
 ipcMain.handle('forge-unload', forgeHandler(async () => { await forgeCall('/sdapi/v1/unload-checkpoint', {}, 60000); return {}; }));
-ipcMain.handle('forge-memory', forgeHandler(async () => {
-  const r = await forgeCall('/sdapi/v1/memory', null, 4000);
-  const c = (r && r.cuda && r.cuda.system) || {};
-  return { used: c.used || 0, total: c.total || 0 };
-}));
+ipcMain.handle('forge-memory', forgeHandler(async () => forgeMemory(await forgeCall('/sdapi/v1/memory', null, 4000))));
 ipcMain.handle('forge-refresh-loras', forgeHandler(async () => { await forgeCall('/sdapi/v1/refresh-loras', {}, 60000); return {}; }));
 ipcMain.handle('forge-refresh-checkpoints', forgeHandler(async () => { await forgeCall('/sdapi/v1/refresh-checkpoints', {}, 60000); return {}; }));
 
