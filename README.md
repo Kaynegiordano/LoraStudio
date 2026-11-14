@@ -22,7 +22,6 @@ npx electron tools/test-app.cjs     # vrais projets et modèles, lecture seule
 npx electron tools/test-train.cjs   # atelier, passerelle simulée
 npx electron tools/test-merge.cjs   # Merge, passerelle simulée
 node tools/test-gpu.cjs --live      # barre de VRAM : lecture de nvidia-smi et des compteurs Windows
-C:\KaneOS\KaneAppData
 C:\KaneOS\KaneAppData\runtimes\studio\venv\Scripts\python.exe tools\test-merge-bridge.py   # calculs du Merge, petits modèles fabriqués
 C:\KaneOS\KaneAppData\runtimes\studio\venv\Scripts\python.exe tools\test-lora-bridge.py
 ```
